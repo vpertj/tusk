@@ -426,28 +426,38 @@ async fn list_columns_core(
     c.dbname = dbname.to_string();
     let (client, _) = open_connection(&c).await?;
 
+    let tbl_lit = format!("\"{}\"", table.replace('"', "\"\""));
+    let col_sql = format!(
+        "SELECT a.attname,
+           CASE WHEN a.atttypmod > 0 THEN
+             CASE t.typname
+               WHEN 'varchar' THEN 'varchar(' || (a.atttypmod - 4) || ')'
+               WHEN 'numeric' THEN 'numeric(' || ((a.atttypmod - 4) >> 16) || ',' || ((a.atttypmod - 4) & 65535) || ')'
+               ELSE t.typname
+             END
+           ELSE t.typname END,
+           CASE WHEN NOT a.attnotnull THEN 'YES' ELSE 'NO' END,
+           pg_get_expr(d.adbin, d.adrelid)
+         FROM pg_attribute a
+         JOIN pg_type t ON t.oid = a.atttypid
+         LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+         WHERE a.attrelid = '{tbl_lit}'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+         ORDER BY a.attnum"
+    );
     let rows = client
-        .query(
-            "SELECT column_name, data_type, is_nullable, column_default
-             FROM information_schema.columns
-             WHERE table_schema = 'public' AND table_name = $1
-             ORDER BY ordinal_position",
-            &[&table],
-        )
+        .query(&col_sql, &[])
         .await
         .map_err(|e| format!("查询字段失败: {e}"))?;
 
+    let pk_sql = format!(
+        "SELECT a.attname FROM pg_constraint c
+         JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+         WHERE c.conrelid = '{tbl_lit}'::regclass AND c.contype = 'p'
+         ORDER BY k.ord"
+    );
     let pk_rows = client
-        .query(
-            "SELECT kcu.column_name
-             FROM information_schema.table_constraints tc
-             JOIN information_schema.key_column_usage kcu
-               ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-             WHERE tc.constraint_type = 'PRIMARY KEY'
-               AND tc.table_schema = 'public' AND tc.table_name = $1",
-            &[&table],
-        )
+        .query(&pk_sql, &[])
         .await
         .map_err(|e| format!("查询主键失败: {e}"))?;
     let pks: std::collections::HashSet<String> =
@@ -1172,6 +1182,160 @@ async fn drop_table(
         Err(e) => eprintln!("[tusk] drop_table ERROR {dbname}.{table}: {e}"),
     }
     res
+}
+
+
+/// 类型名归一化：serial/bigserial → int4/int8（alter 对比时忽略自增语义差异）
+fn norm_type(t: &str) -> String {
+    match t {
+        "serial" => "int4".to_string(),
+        "bigserial" => "int8".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 核心：ALTER TABLE（对比当前结构生成变更子句，事务执行）
+async fn alter_table_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    table: &str,
+    columns: Vec<ColumnDef>,
+) -> Result<(), String> {
+    if table.trim().is_empty() {
+        return Err("表名不能为空".into());
+    }
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+
+    // 当前结构
+    let current = list_columns_core(cfg, dbname, table).await?;
+    let qtable = quote_ident(table);
+
+    let mut stmts: Vec<String> = Vec::new();
+
+    // ---- 主键变化 ----
+    let cur_pk: Vec<String> = current.iter().filter(|x| x.is_pk).map(|x| x.name.clone()).collect();
+    let new_pk: Vec<String> = columns.iter().filter(|x| x.is_pk).map(|x| x.name.clone()).collect();
+    if cur_pk != new_pk {
+        if !cur_pk.is_empty() {
+            // 查主键约束名
+            let rows = client
+                .query(
+                    &format!("SELECT conname FROM pg_constraint WHERE conrelid = '\"{table}\"'::regclass AND contype = 'p' LIMIT 1"),
+                    &[],
+                )
+                .await
+                .map_err(|e| format!("查询主键约束失败: {e}"))?;
+            if let Some(r) = rows.first() {
+                let conname: String = r.get(0);
+                stmts.push(format!("DROP CONSTRAINT {}", quote_ident(&conname)));
+            }
+        }
+        if !new_pk.is_empty() {
+            let pks: Vec<String> = new_pk.iter().map(|p| quote_ident(p)).collect();
+            stmts.push(format!("ADD PRIMARY KEY ({})", pks.join(", ")));
+        }
+    }
+
+    // ---- 列对比 ----
+    for col in &columns {
+        let is_serial = col.is_serial || col.col_type == "serial" || col.col_type == "bigserial";
+        match current.iter().find(|x| x.name == col.name) {
+            Some(cur) => {
+                // 类型变化（serial ↔ int4 视为相同）
+                let cur_t = norm_type(&cur.type_name);
+                let new_t = norm_type(&col.col_type);
+                if cur_t != new_t {
+                    stmts.push(format!(
+                        "ALTER COLUMN {} TYPE {}",
+                        quote_ident(&col.name),
+                        col.col_type
+                    ));
+                }
+                // 可空变化
+                let cur_nullable = cur.is_nullable == "YES";
+                if cur_nullable != col.nullable {
+                    if col.nullable {
+                        stmts.push(format!("ALTER COLUMN {} DROP NOT NULL", quote_ident(&col.name)));
+                    } else if !is_serial {
+                        stmts.push(format!("ALTER COLUMN {} SET NOT NULL", quote_ident(&col.name)));
+                    }
+                }
+                // 默认值变化（serial 列的 nextval 默认值忽略）
+                let cur_def = cur.default.as_deref().unwrap_or("").trim();
+                let new_def = col.default.as_deref().unwrap_or("").trim();
+                let is_nextval = cur_def.contains("nextval(");
+                if is_serial && is_nextval {
+                    // serial 默认值由系统管理，忽略
+                } else if cur_def != new_def {
+                    if new_def.is_empty() {
+                        stmts.push(format!("ALTER COLUMN {} DROP DEFAULT", quote_ident(&col.name)));
+                    } else {
+                        stmts.push(format!(
+                            "ALTER COLUMN {} SET DEFAULT {new_def}",
+                            quote_ident(&col.name)
+                        ));
+                    }
+                }
+            }
+            None => {
+                // 新增列
+                let mut def = format!(
+                    "ADD COLUMN {} {}",
+                    quote_ident(&col.name),
+                    col.col_type.trim()
+                );
+                if !col.nullable && !is_serial {
+                    def.push_str(" NOT NULL");
+                }
+                let d = col.default.as_deref().unwrap_or("").trim();
+                if !d.is_empty() {
+                    def.push_str(&format!(" DEFAULT {d}"));
+                }
+                stmts.push(def);
+            }
+        }
+    }
+
+    // ---- 删除的列 ----
+    for cur in &current {
+        if !columns.iter().any(|x| x.name == cur.name) {
+            stmts.push(format!("DROP COLUMN {}", quote_ident(&cur.name)));
+        }
+    }
+
+    if stmts.is_empty() {
+        return Ok(()); // 无变化
+    }
+
+    // 批量执行（Arc<Client> 无法开事务；逐条在单批次内发送，出错即停）
+    let sql_all: String = stmts
+        .iter()
+        .map(|s| format!("ALTER TABLE {qtable} {s};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    client
+        .batch_execute(&sql_all)
+        .await
+        .map_err(|e| format!("ALTER 失败: {e}"))?;
+    Ok(())
+}
+
+/// 编辑表结构（Tauri command 入口）
+#[tauri::command]
+async fn alter_table(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+    columns: Vec<ColumnDef>,
+) -> Result<(), String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    alter_table_core(&cfg, &dbname, &table, columns).await
 }
 
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
@@ -1997,6 +2161,90 @@ mod tests {
             .get(0);
         assert!(!exists, "大写表应已删除");
     }
+
+    #[tokio::test]
+    async fn test_alter_table() {
+        let cfg = test_cfg();
+        let tname = format!("tusk_alter_test_{}", std::process::id());
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: false, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: true, default: Some("0".into()), is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("建表失败");
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        client
+            .execute(&format!("INSERT INTO \"{tname}\" (name) VALUES ('A')"), &[])
+            .await
+            .expect("插入失败");
+
+        // 1) 加列（有数据时 NOT NULL 需带 DEFAULT）+ 改类型 + 改可空 + 改默认
+        alter_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "varchar(50)".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "price".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("1.5".into()), is_pk: false, is_serial: false },
+                ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: false, default: Some("1".into()), is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("alter 失败");
+        let cols = list_columns_core(&cfg, "tusk_demo", &tname).await.expect("查字段失败");
+        assert_eq!(cols.len(), 4, "应新增 qty");
+        let name = cols.iter().find(|c| c.name == "name").unwrap();
+        assert_eq!(name.type_name, "varchar(50)", "类型应改为 varchar(50): {}", name.type_name);
+        assert!(name.is_nullable == "YES", "name 应改为可空");
+        let price = cols.iter().find(|c| c.name == "price").unwrap();
+        assert_eq!(price.type_name, "numeric(12,2)");
+        assert!(price.default.as_deref().unwrap_or("").contains("1.5"), "默认值应改: {:?}", price.default);
+        let qty = cols.iter().find(|c| c.name == "qty").unwrap();
+        assert!(qty.is_nullable == "NO", "qty 应 NOT NULL");
+        // 旧行 qty 被默认值填充
+        let q: i32 = client.query_one(&format!("SELECT qty FROM \"{tname}\""), &[]).await.expect("q").get(0);
+        assert_eq!(q, 1);
+
+        // 2) 删列 + 主键变化（id+name 组合主键）
+        alter_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "varchar(50)".into(), nullable: true, default: None, is_pk: true, is_serial: false },
+                ColumnDef { name: "price".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("1.5".into()), is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("alter2 失败");
+        let cols2 = list_columns_core(&cfg, "tusk_demo", &tname).await.expect("查字段失败");
+        assert_eq!(cols2.len(), 3, "qty 应被删除");
+        assert_eq!(cols2.iter().filter(|c| c.is_pk).count(), 2, "主键应为 id+name");
+
+        // 3) 无变化调用应成功（幂等；name 已是主键，PG 主键隐含 NOT NULL）
+        alter_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "varchar(50)".into(), nullable: false, default: None, is_pk: true, is_serial: false },
+                ColumnDef { name: "price".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("1.5".into()), is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("无变化应成功");
+
+        drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2024,7 +2272,8 @@ pub fn run() {
             export_csv,
             explain_query,
             create_table,
-            drop_table
+            drop_table,
+            alter_table
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
