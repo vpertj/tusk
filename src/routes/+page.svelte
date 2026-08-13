@@ -252,8 +252,15 @@
     loadTablePage(t);
   }
 
+  // 从 tabs 取响应式 proxy 引用（push 进 $state 数组的元素会被深代理，
+  // 外部保留的原始对象引用不触发响应式，必须重新取）
+  function resolveTab(raw: QueryTab): QueryTab {
+    return tabs.find((x) => x.id === raw.id) ?? raw;
+  }
+
   // 加载表数据页
-  async function loadTablePage(t: QueryTab) {
+  async function loadTablePage(raw: QueryTab) {
+    const t = resolveTab(raw);
     if (!connId || !t.dbname || !t.table) return;
     t.loading = true;
     t.error = '';
@@ -282,7 +289,8 @@
   }
 
   // 加载表结构
-  async function loadStructure(t: QueryTab) {
+  async function loadStructure(raw: QueryTab) {
+    const t = resolveTab(raw);
     if (!connId || !t.dbname || !t.table) return;
     if (t.structure) return;
     try {
@@ -297,20 +305,23 @@
   }
 
   // 切换表页签子标签
-  function setSubTab(t: QueryTab, sub: 'data' | 'structure' | 'sql') {
+  function setSubTab(raw: QueryTab, sub: 'data' | 'structure' | 'sql') {
+    const t = resolveTab(raw);
     t.subTab = sub;
     if (sub === 'structure') loadStructure(t);
     if (sub === 'data' && t.rows.length === 0 && !t.loading) loadTablePage(t);
   }
 
-  function tablePrev(t: QueryTab) {
+  function tablePrev(raw: QueryTab) {
+    const t = resolveTab(raw);
     if (t.page! > 1) {
       t.page!--;
       loadTablePage(t);
     }
   }
 
-  function tableNext(t: QueryTab) {
+  function tableNext(raw: QueryTab) {
+    const t = resolveTab(raw);
     if (t.total! > t.page! * t.pageSize!) {
       t.page!++;
       loadTablePage(t);

@@ -391,7 +391,16 @@ async fn paginate_table(
         let conns = state.conns.lock().await;
         conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
     };
-    paginate_table_core(&cfg, &dbname, &table, limit, offset).await
+    let res = paginate_table_core(&cfg, &dbname, &table, limit, offset).await;
+    match &res {
+        Ok(p) => eprintln!(
+            "[tusk] paginate_table {dbname}.{table} limit={limit} offset={offset} -> {} 行, total={:?}",
+            p.rows.len(),
+            p.total
+        ),
+        Err(e) => eprintln!("[tusk] paginate_table 错误 {dbname}.{table}: {e}"),
+    }
+    res
 }
 
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
