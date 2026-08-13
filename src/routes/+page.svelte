@@ -529,48 +529,66 @@
   </header>
 
   <main>
-    <!-- ============ 连接面板（未连接时显示） ============ -->
+    <!-- ============ 连接管理弹窗（未连接时显示） ============ -->
     {#if showConnPanel && !connId}
-      <div class="conn-panel">
-        {#if savedConns.length > 0}
-          <div class="saved-list">
-            <div class="saved-title">已保存的连接</div>
-            {#each savedConns as sc}
-              <div class="saved-item">
-                <button
-                  class="saved-connect"
-                  onclick={() => connectSaved(sc.name)}
-                  disabled={connecting}
-                >
-                  🔌 {sc.name}
-                  <small>{sc.user}@{sc.host}:{sc.port} / {sc.dbname}</small>
-                </button>
-                <button
-                  class="saved-del"
-                  onclick={() => deleteSaved(sc.name)}
-                  title="删除该连接"
-                  >×</button
-                >
-              </div>
-            {/each}
+      <div class="overlay" role="presentation" onclick={() => (showConnPanel = false)}>
+        <div
+          class="conn-dialog"
+          role="dialog"
+          aria-label="连接数据库"
+          tabindex="-1"
+          onclick={(e) => e.stopPropagation()}
+          onkeydown={(e) => e.key === 'Escape' && (showConnPanel = false)}
+        >
+          <div class="dialog-head">
+            <span class="dialog-title">🔌 连接数据库</span>
+            <button class="dialog-close" onclick={() => (showConnPanel = false)}>×</button>
           </div>
-        {/if}
-        <div class="conn-form">
-          <input bind:value={host} placeholder="host" />
-          <input bind:value={port} type="number" placeholder="port" class="narrow" />
-          <input bind:value={user} placeholder="user" />
-          <input bind:value={password} type="password" placeholder="password" />
-          <input bind:value={dbname} placeholder="database" />
-          <button onclick={doConnect} disabled={connecting}>
-            {connecting ? '连接中…' : '连接'}
-          </button>
-        </div>
-        <div class="conn-extra">
-          <input bind:value={connName} placeholder="连接名（保存后一键连接）" />
-          <label class="save-label">
-            <input type="checkbox" bind:checked={saveConn} />
-            保存此连接（密码入 macOS 钥匙串）
-          </label>
+          <div class="dialog-body">
+            {#if savedConns.length > 0}
+              <div class="saved-title">已保存的连接</div>
+              {#each savedConns as sc}
+                <div class="saved-item">
+                  <button
+                    class="saved-connect"
+                    onclick={() => connectSaved(sc.name)}
+                    disabled={connecting}
+                  >
+                    <span class="conn-ico">🔌</span>
+                    <span class="conn-main">
+                      <span class="conn-name">{sc.name}</span>
+                      <span class="conn-sub">{sc.user}@{sc.host}:{sc.port} · {sc.dbname}</span>
+                    </span>
+                  </button>
+                  <button
+                    class="saved-del"
+                    onclick={() => deleteSaved(sc.name)}
+                    title="删除该连接"
+                    >×</button
+                  >
+                </div>
+              {/each}
+              <div class="divider"></div>
+            {/if}
+            <div class="saved-title">新建连接</div>
+            <div class="conn-form">
+              <input bind:value={host} placeholder="host" />
+              <input bind:value={port} type="number" placeholder="port" class="narrow" />
+              <input bind:value={user} placeholder="user" />
+              <input bind:value={password} type="password" placeholder="password" />
+              <input bind:value={dbname} placeholder="database" />
+            </div>
+            <div class="conn-extra">
+              <input bind:value={connName} placeholder="连接名（保存后一键连接）" />
+              <label class="save-label">
+                <input type="checkbox" bind:checked={saveConn} />
+                保存此连接
+              </label>
+              <button onclick={doConnect} disabled={connecting} class="primary">
+                {connecting ? '连接中…' : '连接'}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     {/if}
@@ -960,6 +978,11 @@
     background: #d64545;
   }
 
+  button.primary {
+    padding: 8px 22px;
+    font-size: 13px;
+  }
+
   .status {
     color: #8b93a3;
     font-size: 12px;
@@ -990,30 +1013,85 @@
     min-height: 0;
   }
 
-  /* 连接面板 */
-  .conn-panel {
-    position: absolute;
-    top: 44px;
-    left: 0;
-    right: 0;
-    z-index: 10;
-    background: #1b1e25;
+  /* ===== 连接管理弹窗 ===== */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .conn-dialog {
+    width: 560px;
+    max-width: calc(100vw - 48px);
+    max-height: 82vh;
+    overflow-y: auto;
+    background: #1e2128;
+    border: 1px solid #363b47;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .dialog-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
     border-bottom: 1px solid #2c303a;
-    padding: 10px 14px;
+    position: sticky;
+    top: 0;
+    background: #1e2128;
+    border-radius: 12px 12px 0 0;
+  }
+
+  .dialog-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #d7dae0;
+  }
+
+  .dialog-close {
+    background: transparent;
+    border: none;
+    color: #8b93a3;
+    font-size: 18px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    line-height: 1;
+  }
+
+  .dialog-close:hover {
+    background: #363b47;
+    color: #e05656;
+  }
+
+  .dialog-body {
+    padding: 14px 18px 18px;
+  }
+
+  .divider {
+    height: 1px;
+    background: #2c303a;
+    margin: 12px 0;
   }
 
   .conn-form {
     display: flex;
     gap: 6px;
-    max-width: 780px;
+    margin-bottom: 10px;
   }
 
   .conn-extra {
     display: flex;
     align-items: center;
     gap: 12px;
-    margin-top: 8px;
-    max-width: 780px;
   }
 
   .conn-extra input:not([type]) {
@@ -1029,23 +1107,18 @@
     white-space: nowrap;
   }
 
-  .saved-list {
-    margin-bottom: 10px;
-    max-width: 780px;
-  }
-
   .saved-title {
     font-size: 11px;
     color: #6b7484;
     letter-spacing: 1px;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
   }
 
   .saved-item {
     display: flex;
     align-items: center;
-    gap: 6px;
-    margin-bottom: 4px;
+    gap: 8px;
+    margin-bottom: 6px;
   }
 
   .saved-connect {
@@ -1053,14 +1126,15 @@
     text-align: left;
     background: #262a33;
     border: 1px solid #363b47;
-    border-radius: 6px;
+    border-radius: 8px;
     color: #d7dae0;
-    padding: 6px 12px;
-    font-size: 12px;
+    padding: 9px 14px;
+    font-size: 13px;
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
+    transition: border-color 0.12s, background 0.12s;
   }
 
   .saved-connect:hover:not(:disabled) {
@@ -1068,19 +1142,44 @@
     background: #2a2f3a;
   }
 
-  .saved-connect small {
+  .saved-connect:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .conn-ico {
+    font-size: 16px;
+  }
+
+  .conn-main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .conn-name {
+    color: #d7dae0;
+    font-weight: 600;
+  }
+
+  .conn-sub {
     color: #6b7484;
     font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .saved-del {
     background: transparent;
     border: 1px solid #363b47;
-    border-radius: 6px;
+    border-radius: 8px;
     color: #8b93a3;
-    padding: 5px 10px;
-    font-size: 13px;
+    padding: 10px 12px;
+    font-size: 14px;
     cursor: pointer;
+    line-height: 1;
   }
 
   .saved-del:hover {

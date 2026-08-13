@@ -620,7 +620,7 @@ fn keychain_get(account: &str) -> Result<Option<String>, String> {
 
 /// Keychain：删除密码（不存在时静默成功）
 fn keychain_delete(account: &str) -> Result<(), String> {
-    let out = std::process::Command::new("security")
+    let _out = std::process::Command::new("security")
         .args(["delete-generic-password", "-a", "tusk", "-s", account])
         .output()
         .map_err(|e| format!("调用 security 失败: {e}"))?;
