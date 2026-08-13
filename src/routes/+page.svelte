@@ -1452,7 +1452,7 @@
     <span>· 数据库：{dbname}</span>
     <span>· 对象树：{dbs.length} 库</span>
     <span class="spacer"></span>
-    <span>Tusk v0.2.0 · Tauri 2 + Rust + Svelte 5</span>
+    <span>Tusk v1.0.0</span>
   </footer>
 </div>
 
