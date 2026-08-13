@@ -461,10 +461,10 @@ fn cell_to_json(row: &Row, i: usize) -> serde_json::Value {
             .map(|b| json!(format!("<bytea {} bytes>", b.len())))
             .unwrap_or(Value::Null),
         "timestamp" => get!(chrono::NaiveDateTime)
-            .map(|v| json!(v.to_string()))
+            .map(|v| json!(v.format("%Y-%m-%d %H:%M:%S").to_string()))
             .unwrap_or(Value::Null),
         "timestamptz" => get!(chrono::DateTime<chrono::Utc>)
-            .map(|v| json!(v.to_rfc3339()))
+            .map(|v| json!(v.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string()))
             .unwrap_or(Value::Null),
         "date" => get!(chrono::NaiveDate)
             .map(|v| json!(v.to_string()))
@@ -537,7 +537,9 @@ mod tests {
         assert_eq!(nums.rows[0][2], serde_json::Value::String("0.00123".into()));
         assert_eq!(nums.rows[0][3], serde_json::Value::String("10000".into()));
         assert!(matches!(r0[3], serde_json::Value::Bool(_)), "bool 应为布尔");
-        assert!(matches!(r0[4], serde_json::Value::String(_)), "timestamptz 应为字符串");
+        let ts = r0[4].as_str().expect("timestamptz 应为字符串");
+        assert_eq!(ts.len(), 19, "timestamptz 应为紧凑格式 YYYY-MM-DD HH:MM:SS: {ts}");
+        assert_eq!(ts.chars().nth(10), Some(' '), "时间分隔应为空格: {ts}");
         assert!(r0[5].is_array(), "jsonb 应为数组/对象");
         assert!(r0[6].is_null(), "NULL bytea 应为 null");
 

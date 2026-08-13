@@ -46,6 +46,7 @@
     error: string;
     running: boolean;
     elapsed: number | null;
+    colWidths: Record<string, string>;
   }
   let tabs = $state<QueryTab[]>([]);
   let activeTabId = $state(0);
@@ -62,6 +63,7 @@
       error: '',
       running: false,
       elapsed: null,
+      colWidths: {},
     };
   }
 
@@ -202,6 +204,7 @@
       t.columns = res.columns;
       t.rows = res.rows;
       t.affected = res.rows_affected;
+      t.colWidths = {}; // 新结果集重置列宽
     } catch (e) {
       t.error = String(e);
       t.columns = [];
@@ -210,6 +213,28 @@
     }
     t.elapsed = performance.now() - t0;
     t.running = false;
+  }
+
+  // 表头拖拽调整列宽
+  function startResize(e: MouseEvent, tab: QueryTab, colName: string) {
+    e.preventDefault();
+    const th = (e.target as HTMLElement).closest('th') as HTMLElement;
+    if (!th) return;
+    const startX = e.clientX;
+    const startW = th.offsetWidth;
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.max(48, startW + (ev.clientX - startX));
+      th.style.width = `${w}px`;
+      tab.colWidths[colName] = `${w}px`;
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   }
 
   function cellText(v: unknown): string {
@@ -392,7 +417,16 @@
                   <thead>
                     <tr>
                       {#each activeTab.columns as col}
-                        <th>{col.name}<small>{col.type_name}</small></th>
+                        <th
+                          style={activeTab.colWidths[col.name] ? `width:${activeTab.colWidths[col.name]}` : ''}
+                        >
+                          {col.name}<small>{col.type_name}</small>
+                          <span
+                            class="resizer"
+                            role="presentation"
+                            onmousedown={(e) => startResize(e, activeTab, col.name)}
+                          ></span>
+                        </th>
                       {/each}
                     </tr>
                   </thead>
@@ -788,6 +822,21 @@
     border-bottom: 1px solid #363b47;
     white-space: nowrap;
     z-index: 1;
+    position: relative;
+  }
+
+  .resizer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 5px;
+    height: 100%;
+    cursor: col-resize;
+    user-select: none;
+  }
+
+  .resizer:hover {
+    background: rgba(79, 195, 247, 0.35);
   }
 
   th small {
