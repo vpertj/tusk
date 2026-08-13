@@ -294,7 +294,7 @@
 
   function openInsertDialog(raw: QueryTab) {
     const t = resolveTab(raw);
-    const cols = t.columns ?? [];
+    const cols = t.structure ?? [];
     if (!cols.length) {
       t.error = '无字段信息，请先刷新';
       return;
@@ -423,13 +423,14 @@
     // 查询标签字段
     sql: string;
     results: QueryResultView[];
-    columns: SchemaColumn[];
+    columns: { name: string; type_name: string }[];
     rows: unknown[][];
     affected: number | null;
     error: string;
     running: boolean;
     elapsed: number | null;
     explainText?: string;
+    message?: string;
     colWidths: Record<string, string>;
     // 表标签字段
     dbname?: string;
