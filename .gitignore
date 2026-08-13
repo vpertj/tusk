@@ -3,3 +3,4 @@ dist/
 build/
 .svelte-kit/
 src-tauri/target/
+.DS_Store
