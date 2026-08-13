@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, Row};
+use tokio_postgres::types::ToSql;
 
 #[derive(Clone)]
 struct ConnEntry {
@@ -1440,6 +1441,113 @@ async fn duplicate_table(
     duplicate_table_core(&cfg, &dbname, &src_table, &new_table, with_data).await
 }
 
+
+// ================= 新增行（填值插入） =================
+
+#[derive(Deserialize, Debug, Clone)]
+struct ColValue {
+    name: String,
+    value: Option<String>,
+}
+
+/// 核心：带值插入一行。values 只含用户填写的列（None 不传该列，走 DB 默认）；
+/// NOT NULL 且无默认值（非 serial）的列必须填写，否则给出明确中文错误
+async fn insert_row_vals_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    table: &str,
+    values: Vec<ColValue>,
+) -> Result<i32, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+
+    // 列信息：name / 短类型名 / 可空 / 默认值
+    let cols = list_columns_core(cfg, dbname, table).await?;
+    let qtable = quote_ident(table);
+
+    let filled: Vec<&ColValue> = values
+        .iter()
+        .filter(|v| v.value.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+        .collect();
+
+    // 必填检查：NOT NULL 无默认（非 nextval）且未填写的列
+    for col in &cols {
+        let has_default = col
+            .default
+            .as_deref()
+            .map(|d| !d.trim().is_empty() && !d.contains("nextval("))
+            .unwrap_or(false);
+        let is_serial = col.default.as_deref().map(|d| d.contains("nextval(")).unwrap_or(false);
+        if col.is_nullable != "YES" && !has_default && !is_serial && !filled.iter().any(|v| v.name == col.name) {
+            return Err(format!(
+                "字段「{}」不能为空：NOT NULL 且无默认值，请填写后再插入",
+                col.name
+            ));
+        }
+    }
+
+    // 显式 NULL 处理：用户输入 NULL → 存 NULL（仅可空列）
+    let mut names: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+    let mut bind: Vec<Option<String>> = Vec::new();
+    let mut idx = 1;
+    for v in &filled {
+        let col = cols
+            .iter()
+            .find(|x| x.name == v.name)
+            .ok_or_else(|| format!("字段「{}」不存在", v.name))?;
+        let val = v.value.as_deref().unwrap_or("").trim();
+        names.push(quote_ident(&v.name));
+        if val.eq_ignore_ascii_case("NULL") {
+            params.push(format!("${idx}::text::{}", col.type_name));
+            bind.push(None);
+        } else {
+            params.push(format!("${idx}::text::{}", col.type_name));
+            bind.push(Some(val.to_string()));
+        }
+        idx += 1;
+    }
+
+    if names.is_empty() {
+        // 什么都没填：直接 DEFAULT VALUES
+        let sql = format!("INSERT INTO {qtable} DEFAULT VALUES RETURNING 1");
+        let row = client
+            .query_one(&sql, &[])
+            .await
+            .map_err(|e| format!("插入失败: {e}"))?;
+        return Ok(row.get(0));
+    }
+
+    let sql = format!(
+        "INSERT INTO {qtable} ({}) VALUES ({}) RETURNING 1",
+        names.join(", "),
+        params.join(", ")
+    );
+    let params_ref: Vec<&(dyn ToSql + Sync)> = bind.iter().map(|b| b as &(dyn ToSql + Sync)).collect();
+    let row = client
+        .query_one(&sql, &params_ref)
+        .await
+        .map_err(|e| format!("插入失败: {e}"))?;
+    Ok(row.get(0))
+}
+
+/// 新增行（Tauri command 入口）
+#[tauri::command]
+async fn insert_row_vals(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+    values: Vec<ColValue>,
+) -> Result<i32, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    insert_row_vals_core(&cfg, &dbname, &table, values).await
+}
+
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
 /// 这里自定义解码（PostgreSQL wire format，精度无损）
 struct NumericString(String);
@@ -2432,6 +2540,101 @@ mod tests {
             drop_table_core(&cfg, "tusk_demo", t).await.expect("清理失败");
         }
     }
+
+    #[tokio::test]
+    async fn test_insert_row_vals() {
+        let cfg = test_cfg();
+        let tname = format!("tusk_insvals_{}", std::process::id());
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: false, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: false, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: true, default: Some("1".into()), is_pk: false, is_serial: false },
+                ColumnDef { name: "note".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("建表失败");
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+
+        // 1) 完整填写 → 成功，serial 自动生成
+        let id1 = insert_row_vals_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColValue { name: "name".into(), value: Some("苹果".into()) },
+                ColValue { name: "price".into(), value: Some("12.5".into()) },
+            ],
+        )
+        .await
+        .expect("插入失败");
+        assert_eq!(id1, 1);
+        let row = client
+            .query_one(&format!("SELECT name, price::float8, qty, note FROM \"{tname}\" WHERE id = 1"), &[])
+            .await
+            .expect("q");
+        let name: String = row.get(0);
+        assert_eq!(name, "苹果");
+        let price: f64 = row.get(1);
+        assert_eq!(price, 12.5);
+        let qty: i32 = row.get(2);
+        assert_eq!(qty, 1, "默认值应生效");
+        let note: Option<String> = row.get(3);
+        assert!(note.is_none(), "可空列留空应为 NULL");
+
+        // 2) 漏填 NOT NULL 无默认列 → 明确中文报错
+        let err = insert_row_vals_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![ColValue { name: "price".into(), value: Some("5".into()) }],
+        )
+        .await
+        .expect_err("应报错");
+        assert!(err.contains("name"), "报错应指明字段: {err}");
+        assert!(err.contains("不能为空"), "报错应中文提示: {err}");
+
+        // 3) 显式填 NULL → 可空列存 NULL
+        insert_row_vals_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColValue { name: "name".into(), value: Some("香蕉".into()) },
+                ColValue { name: "price".into(), value: Some("3.0".into()) },
+                ColValue { name: "note".into(), value: Some("NULL".into()) },
+            ],
+        )
+        .await
+        .expect("插入2失败");
+        let n: i64 = client
+            .query_one(&format!("SELECT count(*) FROM \"{tname}\" WHERE note IS NULL"), &[])
+            .await
+            .expect("q")
+            .get(0);
+        assert_eq!(n, 2, "note 应为 NULL");
+
+        // 4) 非法数值 → 报错
+        let err2 = insert_row_vals_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColValue { name: "name".into(), value: Some("x".into()) },
+                ColValue { name: "price".into(), value: Some("abc".into()) },
+            ],
+        )
+        .await
+        .expect_err("非法数值应报错");
+        assert!(!err2.is_empty());
+
+        drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2461,7 +2664,8 @@ pub fn run() {
             create_table,
             drop_table,
             alter_table,
-            duplicate_table
+            duplicate_table,
+            insert_row_vals
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

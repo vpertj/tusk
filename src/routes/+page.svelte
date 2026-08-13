@@ -285,6 +285,59 @@
     }
   }
 
+  // ===== 新增行弹窗（填值插入） =====
+  let insertDialog = $state<{
+    cols: SchemaColumn[];
+    values: Record<string, string>;
+    err: string;
+  } | null>(null);
+
+  function openInsertDialog(raw: QueryTab) {
+    const t = resolveTab(raw);
+    const cols = t.columns ?? [];
+    if (!cols.length) {
+      t.error = '无字段信息，请先刷新';
+      return;
+    }
+    const values: Record<string, string> = {};
+    for (const c of cols) {
+      if (c.is_pk && (c.default ?? '').includes('nextval(')) {
+        values[c.name] = ''; // serial 主键自动生成
+      } else if (c.default) {
+        values[c.name] = c.default.includes('nextval(') ? '' : (c.default ?? '');
+      } else {
+        values[c.name] = '';
+      }
+    }
+    insertDialog = { cols, values, err: '' };
+  }
+
+  async function doInsertRow(raw: QueryTab) {
+    const d = insertDialog;
+    const t = resolveTab(raw);
+    if (!d || !t) return;
+    const vals = d.cols
+      .filter((c) => (d.values[c.name] ?? '').trim() !== '')
+      .map((c) => ({ name: c.name, value: d.values[c.name].trim() }));
+    if (!vals.length) {
+      d.err = '请至少填写一个字段值';
+      return;
+    }
+    try {
+      const newId = await invoke<number>('insert_row_vals', {
+        connId,
+        dbname: t.dbname,
+        table: t.table,
+        values: vals,
+      });
+      insertDialog = null;
+      await loadTablePage(t);
+      t.message = `已插入第 ${newId} 行`;
+    } catch (e) {
+      d.err = String(e);
+    }
+  }
+
   // 删除表确认弹窗（WKWebView 不支持 window.confirm，必须自定义）
   let confirmDrop = $state<{ db: string; table: string } | null>(null);
 
@@ -370,7 +423,7 @@
     // 查询标签字段
     sql: string;
     results: QueryResultView[];
-    columns: { name: string; type_name: string }[];
+    columns: SchemaColumn[];
     rows: unknown[][];
     affected: number | null;
     error: string;
@@ -1284,7 +1337,7 @@
 
             {#if activeTab.subTab === 'data'}
               <div class="data-toolbar">
-                <button onclick={() => addRow(activeTab)} disabled={activeTab.loading}>
+                <button onclick={() => openInsertDialog(activeTab)} disabled={activeTab.loading}>
                   ＋ 新增行
                 </button>
                 <button
@@ -1549,6 +1602,56 @@
             <button onclick={doCreateTable} class="primary">
               {editingTable ? '保存修改' : '创建表'}
             </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ============ 新增行弹窗 ============ -->
+  {#if insertDialog}
+    <div class="overlay" role="presentation" onclick={() => (insertDialog = null)}>
+      <div
+        class="conn-dialog insert-dialog"
+        role="dialog"
+        aria-label="新增行"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (insertDialog = null)}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">＋ 新增行</span>
+          <button class="dialog-close" onclick={() => (insertDialog = null)}>×</button>
+        </div>
+        <div class="dialog-body">
+          {#if insertDialog.err}
+            <div class="error">⚠ {insertDialog.err}</div>
+          {/if}
+          {#each insertDialog.cols as c}
+            <div class="field">
+              <label for={`ins-${c.name}`}>
+                {c.name}
+                <span class="field-hint">
+                  {c.type_name}
+                  {#if c.is_nullable === 'NO'} · 必填{/if}
+                </span>
+              </label>
+              {#if c.is_pk && (c.default ?? '').includes('nextval(')}
+                <input id={`ins-${c.name}`} value="自动生成" disabled />
+              {:else}
+                <input
+                  id={`ins-${c.name}`}
+                  bind:value={insertDialog.values[c.name]}
+                  placeholder={
+                    c.default ? `默认: ${c.default}` : c.is_nullable === 'NO' ? '必填' : '可留空(NULL)'
+                  }
+                />
+              {/if}
+            </div>
+          {/each}
+          <div class="field-actions" style="margin-top:16px">
+            <button onclick={() => (insertDialog = null)}>取消</button>
+            <button onclick={() => doInsertRow(activeTab)} class="primary">插入</button>
           </div>
         </div>
       </div>
@@ -2226,6 +2329,20 @@
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+
+  /* 新增行弹窗 */
+  .insert-dialog {
+    width: 460px;
+    max-height: 82vh;
+    overflow-y: auto;
+  }
+
+  .field-hint {
+    color: #5c6472;
+    font-size: 11px;
+    font-weight: 400;
+    margin-left: 6px;
   }
 
   /* 右键菜单 */
