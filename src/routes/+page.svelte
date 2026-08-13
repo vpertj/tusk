@@ -212,30 +212,31 @@
     }
   }
 
+  // 删除表确认弹窗（WKWebView 不支持 window.confirm，必须自定义）
+  let confirmDrop = $state<{ db: string; table: string } | null>(null);
+
   // 删除表（对象树入口）
-  async function dropTableFromTree(db: string, table: string) {
-    if (!confirm(`确定删除表「${table}」？表中数据将全部丢失，此操作不可撤销！`)) return;
-    try {
-      await invoke('drop_table', { connId, dbname: db, table });
-      // 关闭已打开的该表页签
-      const openTab = tabs.find((t) => t.kind === 'table' && t.dbname === db && t.table === table);
-      if (openTab) closeTab(openTab.id);
-      await refreshTables(db);
-    } catch (e) {
-      status = `删除表失败: ${e}`;
-    }
+  function dropTableFromTree(db: string, table: string) {
+    confirmDrop = { db, table };
   }
 
   // 删除表（表页签工具栏）
-  async function dropTable(raw: QueryTab) {
+  function dropTable(raw: QueryTab) {
     const t = resolveTab(raw);
-    if (!confirm(`确定删除表「${t.table}」？表中数据将全部丢失，此操作不可撤销！`)) return;
+    confirmDrop = { db: t.dbname!, table: t.table! };
+  }
+
+  async function doDropConfirm() {
+    const cd = confirmDrop;
+    if (!cd) return;
+    confirmDrop = null;
     try {
-      await invoke('drop_table', { connId, dbname: t.dbname, table: t.table });
-      closeTab(t.id);
-      if (t.dbname) await refreshTables(t.dbname);
+      await invoke('drop_table', { connId, dbname: cd.db, table: cd.table });
+      const openTab = tabs.find((t) => t.kind === 'table' && t.dbname === cd.db && t.table === cd.table);
+      if (openTab) closeTab(openTab.id);
+      await refreshTables(cd.db);
     } catch (e) {
-      t.error = String(e);
+      status = `删除表失败: ${e}`;
     }
   }
   let treeOpen = $state<Record<string, boolean>>({}); // key: db / db.table
@@ -1416,6 +1417,35 @@
     </div>
   {/if}
 
+  <!-- ============ 删除表确认弹窗 ============ -->
+  {#if confirmDrop}
+    <div class="overlay" role="presentation" onclick={() => (confirmDrop = null)}>
+      <div
+        class="conn-dialog confirm-dialog"
+        role="alertdialog"
+        aria-label="确认删除"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (confirmDrop = null)}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">🗑 删除表</span>
+          <button class="dialog-close" onclick={() => (confirmDrop = null)}>×</button>
+        </div>
+        <div class="dialog-body">
+          <p class="confirm-text">
+            确定删除表「<b>{confirmDrop.table}</b>」？<br />
+            <span class="confirm-warn">表中数据将全部丢失，此操作不可撤销！</span>
+          </p>
+          <div class="field-actions" style="margin-top:18px">
+            <button onclick={() => (confirmDrop = null)}>取消</button>
+            <button onclick={doDropConfirm} class="danger">确认删除</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- ============ 底部状态栏 ============ -->
   <footer>
     <span>连接：{connId ? '已连接' : '未连接'}</span>
@@ -1959,6 +1989,35 @@
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+
+  /* 删除表确认弹窗 */
+  .confirm-dialog {
+    width: 420px;
+  }
+
+  .confirm-text {
+    color: #d7dae0;
+    font-size: 13px;
+    line-height: 1.7;
+    margin: 4px 0 0;
+  }
+
+  .confirm-text b {
+    color: #e05656;
+  }
+
+  .confirm-warn {
+    color: #8b93a3;
+    font-size: 12px;
+  }
+
+  button.danger {
+    background: #d64545;
+  }
+
+  button.danger:hover:not(:disabled) {
+    background: #e05656;
   }
 
   /* ===== 表设计器 ===== */
