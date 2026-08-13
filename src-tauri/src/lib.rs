@@ -382,6 +382,7 @@ struct SchemaColumn {
     is_nullable: String,
     default: Option<String>,
     is_pk: bool,
+    comment: Option<String>,
 }
 
 /// 核心：列出集群内数据库（pg_database 集群级，当前连接即可查）
@@ -486,6 +487,35 @@ async fn list_indexes(
     list_indexes_core(&cfg, &dbname, &table).await
 }
 
+/// 生成 COMMENT ON 语句（列 + 表），单引号转义
+fn comment_statements(
+    qtable: &str,
+    table_comment: Option<&str>,
+    cols: &[ColumnDef],
+) -> Vec<String> {
+    let mut stmts: Vec<String> = Vec::new();
+    if let Some(c) = table_comment {
+        if !c.trim().is_empty() {
+            stmts.push(format!(
+                "COMMENT ON TABLE {qtable} IS '{}'",
+                c.replace('\'', "''")
+            ));
+        }
+    }
+    for col in cols {
+        if let Some(c) = &col.comment {
+            if !c.trim().is_empty() {
+                let qcol = quote_ident(&col.name);
+                stmts.push(format!(
+                    "COMMENT ON COLUMN {qtable}.{qcol} IS '{}'",
+                    c.replace('\'', "''")
+                ));
+            }
+        }
+    }
+    stmts
+}
+
 /// 核心：创建视图（只允许 SELECT，防注入）
 async fn create_view_core(
     cfg: &ConnConfig,
@@ -574,8 +604,9 @@ async fn list_columns_core(
              END
            ELSE t.typname END,
            CASE WHEN NOT a.attnotnull THEN 'YES' ELSE 'NO' END,
-           pg_get_expr(d.adbin, d.adrelid)
-         FROM pg_attribute a
+           pg_get_expr(d.adbin, d.adrelid),
+           col_description(a.attrelid, a.attnum)
+           FROM pg_attribute a
          JOIN pg_type t ON t.oid = a.atttypid
          LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
          WHERE a.attrelid = '{tbl_lit}'::regclass AND a.attnum > 0 AND NOT a.attisdropped
@@ -608,6 +639,7 @@ async fn list_columns_core(
             is_nullable: r.get(2),
             default: r.get(3),
             is_pk: pks.contains(&r.get::<_, String>(0)),
+            comment: r.get(4),
         })
         .collect())
 }
@@ -1280,6 +1312,8 @@ struct ColumnDef {
     default: Option<String>,
     is_pk: bool,
     is_serial: bool,
+    #[serde(default)]
+    comment: Option<String>,
 }
 
 /// 核心：CREATE TABLE（Navicat 表设计器语义：字段网格 → DDL）
@@ -1288,6 +1322,7 @@ async fn create_table_core(
     dbname: &str,
     table: &str,
     columns: Vec<ColumnDef>,
+    table_comment: Option<String>,
 ) -> Result<(), String> {
     if table.trim().is_empty() {
         return Err("表名不能为空".into());
@@ -1342,6 +1377,14 @@ async fn create_table_core(
             eprintln!("[tusk-ddl] SQL: {sql}");
             msg
         })?;
+    // 建表后写注释（列 + 表）
+    let qtable = quote_ident(table);
+    for stmt in comment_statements(&qtable, table_comment.as_deref(), &columns) {
+        client
+            .execute(&stmt, &[])
+            .await
+            .map_err(|e| format!("添加注释失败: {e}"))?;
+    }
     Ok(())
 }
 
@@ -1366,12 +1409,13 @@ async fn create_table(
     dbname: String,
     table: String,
     columns: Vec<ColumnDef>,
+    table_comment: Option<String>,
 ) -> Result<(), String> {
     let cfg = {
         let conns = state.conns.lock().await;
         conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
     };
-    create_table_core(&cfg, &dbname, &table, columns).await
+    create_table_core(&cfg, &dbname, &table, columns, table_comment).await
 }
 
 /// 删表（Tauri command 入口）
@@ -1410,6 +1454,7 @@ async fn alter_table_core(
     dbname: &str,
     table: &str,
     columns: Vec<ColumnDef>,
+    table_comment: Option<String>,
 ) -> Result<(), String> {
     if table.trim().is_empty() {
         return Err("表名不能为空".into());
@@ -1423,6 +1468,7 @@ async fn alter_table_core(
     let qtable = quote_ident(table);
 
     let mut stmts: Vec<String> = Vec::new();
+    let mut comment_stmts: Vec<String> = Vec::new();
 
     // ---- 主键变化 ----
     let cur_pk: Vec<String> = current.iter().filter(|x| x.is_pk).map(|x| x.name.clone()).collect();
@@ -1488,6 +1534,20 @@ async fn alter_table_core(
                         ));
                     }
                 }
+                // 注释变化
+                let cur_cmt = cur.comment.as_deref().unwrap_or("").trim();
+                let new_cmt = col.comment.as_deref().unwrap_or("").trim();
+                if cur_cmt != new_cmt {
+                    let qcol = quote_ident(&col.name);
+                    if new_cmt.is_empty() {
+                        comment_stmts.push(format!("COMMENT ON COLUMN {qtable}.{qcol} IS NULL"));
+                    } else {
+                        comment_stmts.push(format!(
+                            "COMMENT ON COLUMN {qtable}.{qcol} IS '{}'",
+                            new_cmt.replace('\'', "''")
+                        ));
+                    }
+                }
             }
             None => {
                 // 新增列
@@ -1504,6 +1564,16 @@ async fn alter_table_core(
                     def.push_str(&format!(" DEFAULT {d}"));
                 }
                 stmts.push(def);
+                // 新列注释
+                if let Some(c) = &col.comment {
+                    if !c.trim().is_empty() {
+                        let qcol = quote_ident(&col.name);
+                        comment_stmts.push(format!(
+                            "COMMENT ON COLUMN {qtable}.{qcol} IS '{}'",
+                            c.replace('\'', "''")
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1515,20 +1585,39 @@ async fn alter_table_core(
         }
     }
 
-    if stmts.is_empty() {
+    // ---- 表注释 ----
+    if let Some(c) = &table_comment {
+        if !c.trim().is_empty() {
+            comment_stmts.push(format!(
+                "COMMENT ON TABLE {qtable} IS '{}'",
+                c.replace('\'', "''")
+            ));
+        }
+    }
+
+    if stmts.is_empty() && comment_stmts.is_empty() {
         return Ok(()); // 无变化
     }
 
-    // 批量执行（Arc<Client> 无法开事务；逐条在单批次内发送，出错即停）
-    let sql_all: String = stmts
-        .iter()
-        .map(|s| format!("ALTER TABLE {qtable} {s};"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    client
-        .batch_execute(&sql_all)
-        .await
-        .map_err(|e| format!("ALTER 失败: {e}"))?;
+    // 批量执行 ALTER（Arc<Client> 无法开事务；逐条在单批次内发送，出错即停）
+    if !stmts.is_empty() {
+        let sql_all: String = stmts
+            .iter()
+            .map(|s| format!("ALTER TABLE {qtable} {s};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        client
+            .batch_execute(&sql_all)
+            .await
+            .map_err(|e| format!("ALTER 失败: {e}"))?;
+    }
+    // COMMENT ON 是独立语句，逐条执行
+    for cs in &comment_stmts {
+        client
+            .execute(cs, &[])
+            .await
+            .map_err(|e| format!("注释更新失败: {e}"))?;
+    }
     Ok(())
 }
 
@@ -1540,12 +1629,13 @@ async fn alter_table(
     dbname: String,
     table: String,
     columns: Vec<ColumnDef>,
+    table_comment: Option<String>,
 ) -> Result<(), String> {
     let cfg = {
         let conns = state.conns.lock().await;
         conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
     };
-    alter_table_core(&cfg, &dbname, &table, columns).await
+    alter_table_core(&cfg, &dbname, &table, columns, table_comment).await
 }
 
 
@@ -2440,7 +2530,7 @@ mod tests {
         let tname = format!("tusk_ddl_test_{}", std::process::id());
 
         // 空字段拒绝
-        let err = create_table_core(&cfg, "tusk_demo", "empty_table", vec![])
+        let err = create_table_core(&cfg, "tusk_demo", "empty_table", vec![], None)
             .await
             .expect_err("空字段应拒绝");
         assert!(err.contains("至少"), "错误提示: {err}");
@@ -2454,6 +2544,7 @@ mod tests {
                 default: None,
                 is_pk: true,
                 is_serial: true,
+            comment: None,
             },
             ColumnDef {
                 name: "name".into(),
@@ -2462,6 +2553,7 @@ mod tests {
                 default: None,
                 is_pk: false,
                 is_serial: false,
+            comment: None,
             },
             ColumnDef {
                 name: "price".into(),
@@ -2470,6 +2562,7 @@ mod tests {
                 default: Some("0".into()),
                 is_pk: false,
                 is_serial: false,
+            comment: None,
             },
             ColumnDef {
                 name: "created_at".into(),
@@ -2478,9 +2571,10 @@ mod tests {
                 default: Some("now()".into()),
                 is_pk: false,
                 is_serial: false,
+            comment: None,
             },
         ];
-        create_table_core(&cfg, "tusk_demo", &tname, cols)
+        create_table_core(&cfg, "tusk_demo", &tname, cols, None)
             .await
             .expect("建表失败");
 
@@ -2528,7 +2622,9 @@ mod tests {
                 default: None,
                 is_pk: true,
                 is_serial: true,
+            comment: None,
             }],
+            None
         )
         .await
         .expect_err("重名应报错");
@@ -2556,7 +2652,9 @@ mod tests {
                 default: None,
                 is_pk: true,
                 is_serial: true,
+            comment: None,
             }],
+            None
         )
         .await
         .expect("建表失败");
@@ -2586,14 +2684,14 @@ mod tests {
         let cfg = test_cfg();
         let tname = format!("tusk_e2e_{}", std::process::id());
         let cols = vec![
-            ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-            ColumnDef { name: "title".into(), col_type: "varchar(255)".into(), nullable: false, default: None, is_pk: false, is_serial: false },
-            ColumnDef { name: "amount".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("0.00".into()), is_pk: false, is_serial: false },
-            ColumnDef { name: "enabled".into(), col_type: "bool".into(), nullable: false, default: Some("true".into()), is_pk: false, is_serial: false },
-            ColumnDef { name: "tags".into(), col_type: "jsonb".into(), nullable: true, default: Some("'[]'::jsonb".into()), is_pk: false, is_serial: false },
-            ColumnDef { name: "created_at".into(), col_type: "timestamptz".into(), nullable: true, default: Some("now()".into()), is_pk: false, is_serial: false },
+            ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+            ColumnDef { name: "title".into(), col_type: "varchar(255)".into(), nullable: false, default: None, is_pk: false, is_serial: false, comment: None },
+            ColumnDef { name: "amount".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("0.00".into()), is_pk: false, is_serial: false, comment: None },
+            ColumnDef { name: "enabled".into(), col_type: "bool".into(), nullable: false, default: Some("true".into()), is_pk: false, is_serial: false, comment: None },
+            ColumnDef { name: "tags".into(), col_type: "jsonb".into(), nullable: true, default: Some("'[]'::jsonb".into()), is_pk: false, is_serial: false, comment: None },
+            ColumnDef { name: "created_at".into(), col_type: "timestamptz".into(), nullable: true, default: Some("now()".into()), is_pk: false, is_serial: false, comment: None },
         ];
-        create_table_core(&cfg, "tusk_demo", &tname, cols).await.expect("建表失败");
+        create_table_core(&cfg, "tusk_demo", &tname, cols, None).await.expect("建表失败");
 
         let (client, _) = open_connection(&cfg).await.expect("连接失败");
         // 插入完整数据验证所有默认值/类型
@@ -2648,9 +2746,10 @@ mod tests {
             "tusk_demo",
             tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("建大写表失败");
@@ -2689,10 +2788,11 @@ mod tests {
             "tusk_demo",
             &tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: false, default: None, is_pk: false, is_serial: false },
-                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: true, default: Some("0".into()), is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: false, default: None, is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: true, default: Some("0".into()), is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("建表失败");
@@ -2708,11 +2808,12 @@ mod tests {
             "tusk_demo",
             &tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "varchar(50)".into(), nullable: true, default: None, is_pk: false, is_serial: false },
-                ColumnDef { name: "price".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("1.5".into()), is_pk: false, is_serial: false },
-                ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: false, default: Some("1".into()), is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "varchar(50)".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "price".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("1.5".into()), is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: false, default: Some("1".into()), is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("alter 失败");
@@ -2736,10 +2837,11 @@ mod tests {
             "tusk_demo",
             &tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "varchar(50)".into(), nullable: true, default: None, is_pk: true, is_serial: false },
-                ColumnDef { name: "price".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("1.5".into()), is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "varchar(50)".into(), nullable: true, default: None, is_pk: true, is_serial: false, comment: None },
+                ColumnDef { name: "price".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("1.5".into()), is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("alter2 失败");
@@ -2753,10 +2855,11 @@ mod tests {
             "tusk_demo",
             &tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "varchar(50)".into(), nullable: false, default: None, is_pk: true, is_serial: false },
-                ColumnDef { name: "price".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("1.5".into()), is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "varchar(50)".into(), nullable: false, default: None, is_pk: true, is_serial: false, comment: None },
+                ColumnDef { name: "price".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("1.5".into()), is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("无变化应成功");
@@ -2776,10 +2879,11 @@ mod tests {
             "tusk_demo",
             &src,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: false, default: None, is_pk: false, is_serial: false },
-                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: true, default: Some("0".into()), is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: false, default: None, is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: true, default: Some("0".into()), is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("建源表失败");
@@ -2858,12 +2962,13 @@ mod tests {
             "tusk_demo",
             &tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: false, default: None, is_pk: false, is_serial: false },
-                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: false, default: None, is_pk: false, is_serial: false },
-                ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: true, default: Some("1".into()), is_pk: false, is_serial: false },
-                ColumnDef { name: "note".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: false, default: None, is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: false, default: None, is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: true, default: Some("1".into()), is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "note".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("建表失败");
@@ -2953,11 +3058,12 @@ mod tests {
             "tusk_demo",
             &tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
-                ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: true, default: None, is_pk: false, is_serial: false },
-                ColumnDef { name: "tag".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "tag".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("建表失败");
@@ -3045,10 +3151,11 @@ mod tests {
             "tusk_demo",
             &tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
-                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("建表失败");
@@ -3096,9 +3203,10 @@ mod tests {
             "tusk_demo",
             &tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("建表失败");
@@ -3147,10 +3255,11 @@ mod tests {
             "tusk_demo",
             &tname,
             vec![
-                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
-                ColumnDef { name: "email".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
-                ColumnDef { name: "tag".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "email".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
+                ColumnDef { name: "tag".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
             ],
+            None
         )
         .await
         .expect("建表失败");
@@ -3169,6 +3278,69 @@ mod tests {
         let email = idxs.iter().find(|i| i.name.contains("email")).expect("email 索引");
         assert!(email.is_unique, "email 索引应唯一");
         assert!(email.columns.contains("email"), "列应为 email: {}", email.columns);
+
+        drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
+    }
+
+    #[tokio::test]
+    async fn test_comments() {
+        let cfg = test_cfg();
+        let tname = format!("tusk_cmt_{}", std::process::id());
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: Some("主键".into()) },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: Some("名称".into()) },
+            ],
+            Some("测试表注释".to_string()),
+        )
+        .await
+        .expect("建表失败");
+
+        // 列注释存在
+        let cols = list_columns_core(&cfg, "tusk_demo", &tname).await.expect("列失败");
+        let id = cols.iter().find(|c| c.name == "id").unwrap();
+        assert_eq!(id.comment.as_deref(), Some("主键"), "id 注释: {:?}", id.comment);
+
+        // 表注释存在
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        let tcmt: Option<String> = client
+            .query_one(
+                "SELECT obj_description(c.oid, 'pg_class') FROM pg_class c WHERE c.relname = $1",
+                &[&tname],
+            )
+            .await
+            .expect("q")
+            .get(0);
+        assert_eq!(tcmt.as_deref(), Some("测试表注释"), "表注释: {tcmt:?}");
+
+        // 修改注释
+        alter_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: Some("主键ID".into()) },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
+            ],
+            Some("新表注释".to_string()),
+        )
+        .await
+        .expect("改注释失败");
+        let cols2 = list_columns_core(&cfg, "tusk_demo", &tname).await.expect("列2失败");
+        let id2 = cols2.iter().find(|c| c.name == "id").unwrap();
+        assert_eq!(id2.comment.as_deref(), Some("主键ID"));
+        let tcmt2: Option<String> = client
+            .query_one(
+                "SELECT obj_description(c.oid, 'pg_class') FROM pg_class c WHERE c.relname = $1",
+                &[&tname],
+            )
+            .await
+            .expect("q")
+            .get(0);
+        assert_eq!(tcmt2.as_deref(), Some("新表注释"));
 
         drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
     }
