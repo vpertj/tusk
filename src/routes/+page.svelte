@@ -16,9 +16,39 @@
   let status = $state('未连接');
 
   // ================= 对象树 =================
+  // 左侧树宽度（默认 260，可拖拽，记忆到本地）
+  const savedW =
+    typeof localStorage !== 'undefined'
+      ? Number(localStorage.getItem('tusk.sidebarWidth'))
+      : NaN;
+  let sidebarWidth = $state(
+    Number.isFinite(savedW) && savedW >= 160 && savedW <= 480 ? savedW : 260,
+  );
+  $effect(() => {
+    localStorage.setItem('tusk.sidebarWidth', String(sidebarWidth));
+  });
+
+  function startSidebarResize(e: MouseEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    const onMove = (ev: MouseEvent) => {
+      sidebarWidth = Math.max(160, Math.min(480, startW + (ev.clientX - startX)));
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }
+
   interface DatabaseInfo {
     name: string;
   }
+
   interface TableInfo {
     name: string;
   }
@@ -297,7 +327,7 @@
     {/if}
 
     <!-- ============ 左侧对象树 ============ -->
-    <aside class="sidebar">
+    <aside class="sidebar" style={`width:${sidebarWidth}px`}>
       <div class="sidebar-title">连接</div>
       {#if connId}
         <div class="tree">
@@ -357,6 +387,9 @@
         <div class="empty-tree">连接后显示数据库对象</div>
       {/if}
     </aside>
+
+    <!-- 侧栏拖拽手柄 -->
+    <div class="sidebar-resizer" role="presentation" onmousedown={startSidebarResize}></div>
 
     <!-- ============ 中央标签页工作区 ============ -->
     <section class="workspace">
@@ -599,12 +632,22 @@
 
   /* ===== 左侧对象树 ===== */
   .sidebar {
-    width: 260px;
-    min-width: 260px;
     background: #191c22;
     border-right: 1px solid #2c303a;
     overflow: auto;
     padding-bottom: 12px;
+    flex-shrink: 0;
+  }
+
+  .sidebar-resizer {
+    width: 5px;
+    cursor: col-resize;
+    flex-shrink: 0;
+    user-select: none;
+  }
+
+  .sidebar-resizer:hover {
+    background: rgba(79, 195, 247, 0.35);
   }
 
   .sidebar-title {
