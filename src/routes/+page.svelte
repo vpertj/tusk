@@ -462,12 +462,24 @@
                         class:open={treeOpen[`${db.name}.${tb.name}`]}
                         role="button"
                         tabindex="0"
-                        onclick={() => toggleTable(db.name, tb.name)}
-                        onkeydown={(e) => e.key === 'Enter' && toggleTable(db.name, tb.name)}
-                        ondblclick={() => openTableTab(db.name, tb.name)}
-                        title="双击打开表（数据/结构/SQL）"
+                        onclick={() => openTableTab(db.name, tb.name)}
+                        onkeydown={(e) => e.key === 'Enter' && openTableTab(db.name, tb.name)}
+                        title="单击打开表（数据/结构/SQL）"
                       >
-                        <span class="arrow">{treeOpen[`${db.name}.${tb.name}`] ? '▾' : '▸'}</span>
+                        <span
+                          class="arrow"
+                          role="button"
+                          tabindex="0"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            toggleTable(db.name, tb.name);
+                          }}
+                          onkeydown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Enter') toggleTable(db.name, tb.name);
+                          }}
+                          >{treeOpen[`${db.name}.${tb.name}`] ? '▾' : '▸'}</span
+                        >
                         <span class="ico">📋</span>
                         <span class="label">{tb.name}</span>
                         {#if loadingKey === `${db.name}.${tb.name}`}<span class="spin">…</span>{/if}
