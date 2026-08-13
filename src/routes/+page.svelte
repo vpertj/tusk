@@ -329,8 +329,13 @@
   }
 
   // 表 SQL 预览 → 在查询编辑器打开
+  // 注意：dbname 是数据库名不是 schema，表在 public schema 下
+  function tablePreviewSql(t: QueryTab): string {
+    return `SELECT * FROM "public"."${t.table}";`;
+  }
+
   function openTableInEditor(t: QueryTab) {
-    const sql = `SELECT * FROM "${t.dbname}"."${t.table}";`;
+    const sql = tablePreviewSql(t);
     const q = newTab(sql);
     tabs.push(q);
     activeTabId = q.id;
@@ -736,7 +741,7 @@
             {:else}
               <div class="result">
                 <div class="sql-preview">
-                  <pre>SELECT * FROM "{activeTab.dbname}"."{activeTab.table}";</pre>
+                  <pre>{tablePreviewSql(activeTab)}</pre>
                   <button onclick={() => openTableInEditor(activeTab)}>在编辑器中打开</button>
                 </div>
               </div>
@@ -1219,23 +1224,46 @@
     text-align: left;
     padding: 8px 12px;
     border-bottom: 1px solid #363b47;
+    border-right: 1px solid #2e3340;
     white-space: nowrap;
     z-index: 1;
     position: relative;
+  }
+
+  th:last-child {
+    border-right: none;
   }
 
   .resizer {
     position: absolute;
     top: 0;
     right: 0;
-    width: 5px;
+    width: 7px;
     height: 100%;
     cursor: col-resize;
     user-select: none;
+    z-index: 2;
+  }
+
+  /* 常驻细线：提示每一列的拖拽边界 */
+  .resizer::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 3px;
+    width: 1px;
+    height: 100%;
+    background: #454c5c;
+  }
+
+  .resizer:hover::after {
+    right: 2.5px;
+    width: 2px;
+    background: #4fc3f7;
   }
 
   .resizer:hover {
-    background: rgba(79, 195, 247, 0.35);
+    background: rgba(79, 195, 247, 0.12);
   }
 
   th small {
