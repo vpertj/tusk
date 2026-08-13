@@ -10,7 +10,7 @@
   let dbType = $state('postgres');
   let showConnPanel = $state(true);
   let connName = $state('');
-  let saveConn = $state(false);
+  let saveConn = $state(true);
   let savedConns = $state<
     { db_type: string; name: string; host: string; port: number; user: string; dbname: string }[]
   >([]);
@@ -1171,10 +1171,20 @@
   .save-label {
     color: #8b93a3;
     font-size: 12px;
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 6px;
     white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .save-label input[type='checkbox'] {
+    margin: 0;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    accent-color: #4fc3f7;
+    cursor: pointer;
   }
 
   .saved-title {
