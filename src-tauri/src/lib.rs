@@ -1015,6 +1015,39 @@ async fn export_csv(
     export_csv_core(&cfg, &dbname, &table).await
 }
 
+/// 核心：EXPLAIN (ANALYZE, BUFFERS)。仅允许 SELECT（ANALYZE 会真实执行，DML 有副作用）
+async fn explain_query_core(client: &Client, sql: &str) -> Result<String, String> {
+    let stmts = split_statements(sql);
+    if stmts.len() != 1 {
+        return Err("Explain 仅支持单条语句".into());
+    }
+    let head = stmts[0].trim_start().to_ascii_uppercase();
+    if !head.starts_with("SELECT") {
+        return Err("Explain 仅支持 SELECT（ANALYZE 会真实执行，DML 有副作用）".into());
+    }
+    let explain_sql = format!("EXPLAIN (ANALYZE, BUFFERS) {}", stmts[0]);
+    let rows = client
+        .query(&explain_sql, &[])
+        .await
+        .map_err(|e| format!("Explain 失败: {e}"))?;
+    let text: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+    Ok(text.join("\n"))
+}
+
+/// Explain（Tauri command 入口）
+#[tauri::command]
+async fn explain_query(
+    state: State<'_, AppState>,
+    conn_id: String,
+    sql: String,
+) -> Result<String, String> {
+    let entry = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
+    };
+    explain_query_core(&entry.client, &sql).await
+}
+
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
 /// 这里自定义解码（PostgreSQL wire format，精度无损）
 struct NumericString(String);
@@ -1575,6 +1608,23 @@ mod tests {
         assert!(content.contains("测试商品") == false, "不应包含已删除数据");
         std::fs::remove_file(&path).ok();
     }
+
+    #[tokio::test]
+    async fn test_explain() {
+        let (client, _) = open_connection(&test_cfg()).await.expect("连接失败");
+        let plan = explain_query_core(&client, "SELECT * FROM products WHERE id = 1")
+            .await
+            .expect("Explain 失败");
+        assert!(
+            plan.contains("Seq Scan") || plan.contains("Index Scan") || plan.contains("Planning"),
+            "应有执行计划: {plan}"
+        );
+        // 非 SELECT 拒绝（EXPLAIN ANALYZE 会真实执行 DML，不做）
+        let err = explain_query_core(&client, "UPDATE products SET name = name")
+            .await
+            .expect_err("应拒绝非 SELECT");
+        assert!(err.contains("SELECT"), "错误信息应说明仅支持 SELECT: {err}");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1599,7 +1649,8 @@ pub fn run() {
             update_cell,
             delete_row,
             insert_row,
-            export_csv
+            export_csv,
+            explain_query
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -101,6 +101,7 @@
     error: string;
     running: boolean;
     elapsed: number | null;
+    explainText?: string;
     colWidths: Record<string, string>;
     // 表标签字段
     dbname?: string;
@@ -549,6 +550,19 @@
     histIdx = -1;
   }
 
+  async function runExplain(tab?: QueryTab) {
+    const t = tab ?? activeTab;
+    if (!t || !connId || !t.sql.trim()) return;
+    t.running = true;
+    try {
+      t.explainText = await invoke<string>('explain_query', { connId, sql: t.sql });
+      t.error = '';
+    } catch (e) {
+      t.error = String(e);
+    }
+    t.running = false;
+  }
+
   // ================= 查询 =================
   async function runQuery(tab?: QueryTab) {
     const t = tab ?? activeTab;
@@ -860,14 +874,26 @@
                 onkeydown={keydown}
               ></textarea>
               <div class="editor-bar">
-                <button onclick={() => runQuery()} disabled={!connId || activeTab.running}>
-                  {activeTab.running ? '执行中…' : '▶ 执行'}
+                <button onclick={() => runQuery(activeTab)} disabled={!connId || activeTab.running}>
+                  ▶ 执行 <kbd>⌘⏎</kbd>
                 </button>
+                <button
+                  onclick={() => runExplain(activeTab)}
+                  disabled={!connId || activeTab.running}
+                  title="EXPLAIN (ANALYZE, BUFFERS)，仅支持单条 SELECT"
+                  >🧠 Explain</button
+                >
                 <span class="hint">Cmd+Enter 执行 · Cmd+N 新查询</span>
               </div>
             </div>
 
             <div class="result">
+              {#if activeTab.explainText}
+                <div class="explain-box">
+                  <div class="explain-title">📊 执行计划（EXPLAIN ANALYZE）</div>
+                  <pre>{activeTab.explainText}</pre>
+                </div>
+              {/if}
               {#each activeTab.results as res, ri}
                 <div class="result-block">
                   {#if res.error}
@@ -908,7 +934,7 @@
                     </div>
                     <div class="count">
                       第 {ri + 1} 条 · 共 {res.rows.length} 行
-                      {#if ri === activeTab.results.length - 1 && activeTab.elapsed !== null}
+                      {#if ri === activeTab.results.length - 1 && activeTab.elapsed != null}
                         · 耗时 {activeTab.elapsed.toFixed(0)} ms
                       {/if}
                     </div>
@@ -1617,6 +1643,32 @@
   .tab-ico {
     font-size: 11px;
     opacity: 0.8;
+  }
+
+  /* Explain 执行计划 */
+  .explain-box {
+    margin: 10px 14px 0;
+    background: #161a22;
+    border: 1px solid #2c303a;
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+
+  .explain-title {
+    font-size: 11px;
+    color: #6b7484;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+  }
+
+  .explain-box pre {
+    margin: 0;
+    color: #9fe8b0;
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 
   /* 数据页工具栏 */
