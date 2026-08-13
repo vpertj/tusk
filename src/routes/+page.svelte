@@ -1162,10 +1162,16 @@
 
   .field-actions {
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: space-between;
     gap: 12px;
-    margin-top: 4px;
+    margin-top: 6px;
+    padding-top: 12px;
+    border-top: 1px solid #2c303a;
+  }
+
+  .field-actions button.primary {
+    width: 180px;
   }
 
   .save-label {
