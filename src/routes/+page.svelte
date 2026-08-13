@@ -99,6 +99,7 @@
     type_name: string;
     is_nullable: string;
     default: string | null;
+    comment?: string | null;
     is_pk: boolean;
   }
   interface IndexInfo {
