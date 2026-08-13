@@ -491,6 +491,7 @@ async fn paginate_table_core(
     table: &str,
     limit: u32,
     offset: u32,
+    filters: Vec<FilterCond>,
 ) -> Result<TablePage, String> {
     let mut c = cfg.clone();
     c.dbname = dbname.to_string();
@@ -519,26 +520,59 @@ async fn paginate_table_core(
         format!(" ORDER BY {}", cols.join(", "))
     };
 
-    let sql = format!("SELECT * FROM {qtable}{order_by} LIMIT $1 OFFSET $2");
-    let stmt = client
-        .prepare(&sql)
-        .await
-        .map_err(|e| format!("SQL 预编译失败: {e}"))?;
+    // 筛选条件（列名 quote_ident 防注入、运算符白名单、值参数化 + 类型强转）
+    let mut where_sql = String::new();
+    let mut binds: Vec<Option<String>> = Vec::new();
+    if !filters.is_empty() {
+        let cols = list_columns_core(cfg, dbname, table).await?;
+        let mut wheres: Vec<String> = Vec::new();
+        let mut idx = 1;
+        for f in &filters {
+            let col = cols
+                .iter()
+                .find(|c| c.name == f.column)
+                .ok_or_else(|| format!("筛选列「{}」不存在", f.column))?;
+            let op = f.op.trim().to_ascii_uppercase();
+            let qcol = quote_ident(&f.column);
+            match op.as_str() {
+                "IS NULL" | "IS NOT NULL" => wheres.push(format!("{qcol} {op}")),
+                "=" | "!=" | "<>" | ">" | "<" | ">=" | "<=" | "LIKE" | "ILIKE" | "NOT LIKE"
+                | "NOT ILIKE" => {
+                    let v = f.value.as_deref().unwrap_or("").trim();
+                    if v.is_empty() {
+                        return Err(format!("筛选条件「{qcol} {op}」缺少值"));
+                    }
+                    wheres.push(format!("{qcol} {op} ${idx}::text::{}", col.type_name));
+                    binds.push(Some(v.to_string()));
+                    idx += 1;
+                }
+                _ => return Err(format!("不支持的运算符: {}", f.op)),
+            }
+        }
+        where_sql = format!(" WHERE {}", wheres.join(" AND "));
+    }
+    let binds_ref: Vec<&(dyn ToSql + Sync)> = binds.iter().map(|b| b as &(dyn ToSql + Sync)).collect();
+
+    let sql = format!("SELECT * FROM {qtable}{where_sql}{order_by} LIMIT {limit} OFFSET {offset}");
     let rows = client
-        .query(&stmt, &[&(limit as i64), &(offset as i64)])
+        .query(&sql, &binds_ref)
         .await
         .map_err(|e| format!("查询失败: {e}"))?;
-    let columns: Vec<ColumnInfo> = stmt
-        .columns()
-        .iter()
-        .map(|c| ColumnInfo {
-            name: c.name().to_string(),
-            type_name: c.type_().name().to_string(),
+    let columns: Vec<ColumnInfo> = rows
+        .first()
+        .map(|r| {
+            r.columns()
+                .iter()
+                .map(|c| ColumnInfo {
+                    name: c.name().to_string(),
+                    type_name: c.type_().name().to_string(),
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     let rows: Vec<Vec<serde_json::Value>> = rows.iter().map(row_to_json).collect();
     let total: i64 = client
-        .query_one(&format!("SELECT count(*) FROM {qtable}"), &[])
+        .query_one(&format!("SELECT count(*) FROM {qtable}{where_sql}"), &binds_ref)
         .await
         .map_err(|e| format!("查询总行数失败: {e}"))?
         .get(0);
@@ -558,12 +592,13 @@ async fn paginate_table(
     table: String,
     limit: u32,
     offset: u32,
+    filters: Vec<FilterCond>,
 ) -> Result<TablePage, String> {
     let cfg = {
         let conns = state.conns.lock().await;
         conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
     };
-    let res = paginate_table_core(&cfg, &dbname, &table, limit, offset).await;
+    let res = paginate_table_core(&cfg, &dbname, &table, limit, offset, filters).await;
     match &res {
         Ok(p) => eprintln!(
             "[tusk] paginate_table {dbname}.{table} limit={limit} offset={offset} -> {} 行, total={:?}",
@@ -1084,6 +1119,13 @@ async fn explain_query(
 // ================= 表结构管理（DDL） =================
 
 #[derive(Deserialize, Debug, Clone)]
+struct FilterCond {
+    column: String,
+    op: String,
+    value: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 struct ColumnDef {
     name: String,
     col_type: String,
@@ -1568,7 +1610,105 @@ async fn insert_row_vals(
     insert_row_vals_core(&cfg, &dbname, &table, values).await
 }
 
-/// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
+/// 导出表数据为 SQL（INSERT 语句），值统一转义为字符串字面量
+async fn export_sql_core(cfg: &ConnConfig, dbname: &str, table: &str) -> Result<String, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    let qtable = quote_ident(table);
+
+    // 列名（用于 INSERT 列清单）
+    let cols = list_columns_core(cfg, dbname, table).await?;
+    let col_names: Vec<String> = cols.iter().map(|x| quote_ident(&x.name)).collect();
+
+    // 全部数据
+    let rows = client
+        .query(&format!("SELECT * FROM {qtable}"), &[])
+        .await
+        .map_err(|e| format!("查询失败: {e}"))?;
+
+    let mut out = String::new();
+    out.push_str(&format!("-- 表数据导出: {table}\\n-- 生成时间: {}\\n\\n", now_str()));
+    out.push_str(&format!("TRUNCATE {qtable};\\n\\n"));
+
+    let mut buf: Vec<String> = Vec::new();
+    for r in &rows {
+        let row_vals = row_to_json(r);
+        let vals: Vec<String> = row_vals
+            .iter()
+            .map(|jv| {
+                if jv.is_null() {
+                    "NULL".to_string()
+                } else {
+                    let s = match jv {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => jv.to_string(),
+                    };
+                    format!("'{}'", s.replace('\'', "''"))
+                }
+            })
+            .collect();
+        buf.push(format!("({})", vals.join(", ")));
+        if buf.len() >= 500 {
+            out.push_str(&format!(
+                "INSERT INTO {qtable} ({}) VALUES\\n{};\\n",
+                col_names.join(", "),
+                buf.join(",\\n")
+            ));
+            buf.clear();
+        }
+    }
+    if !buf.is_empty() {
+        out.push_str(&format!(
+            "INSERT INTO {qtable} ({}) VALUES\\n{};\\n",
+            col_names.join(", "),
+            buf.join(",\\n")
+        ));
+    }
+    Ok(out)
+}
+
+/// 通用：写入文本文件（用于导出下载；路径需以 ~/ 开头）
+async fn write_text_file_core(path: &str, content: &str) -> Result<(), String> {
+    let expanded = if let Some(rest) = path.strip_prefix("~/") {
+        format!("{}/{}", std::env::var("HOME").unwrap_or_default(), rest)
+    } else {
+        path.to_string()
+    };
+    std::fs::write(&expanded, content).map_err(|e| format!("写入文件失败: {e}"))
+}
+
+fn now_str() -> String {
+    // 简单本地时间戳（无 chrono 依赖）
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{}", secs)
+}
+
+#[tauri::command]
+async fn export_sql(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+) -> Result<String, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    export_sql_core(&cfg, &dbname, &table).await
+}
+
+#[tauri::command]
+async fn write_text_file(path: String, content: String) -> Result<(), String> {
+    write_text_file_core(&path, &content).await
+}
+
+/// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，'''
 /// 这里自定义解码（PostgreSQL wire format，精度无损）
 struct NumericString(String);
 
@@ -1828,14 +1968,14 @@ mod tests {
     #[tokio::test]
     async fn test_pagination() {
         let cfg = test_cfg();
-        let page1 = paginate_table_core(&cfg, "tusk_demo", "products", 2, 0)
+        let page1 = paginate_table_core(&cfg, "tusk_demo", "products", 2, 0, vec![])
             .await
             .expect("第一页失败");
         assert_eq!(page1.rows.len(), 2, "limit=2 应返回 2 行");
         let total = page1.total.expect("应有总数");
         assert!(total >= 4, "products 应至少 4 行（用户可能已手动新增）: {total}");
 
-        let page2 = paginate_table_core(&cfg, "tusk_demo", "products", 2, 2)
+        let page2 = paginate_table_core(&cfg, "tusk_demo", "products", 2, 2, vec![])
             .await
             .expect("第二页失败");
         assert_eq!(page2.rows.len(), 2);
@@ -1862,7 +2002,7 @@ mod tests {
             .execute("UPDATE products SET name = name WHERE id = 1", &[])
             .await
             .expect("更新失败");
-        let page_after = paginate_table_core(&cfg, "tusk_demo", "products", 2, 0)
+        let page_after = paginate_table_core(&cfg, "tusk_demo", "products", 2, 0, vec![])
             .await
             .expect("更新后第一页失败");
         let ids_after: Vec<i64> = page_after
@@ -2332,7 +2472,7 @@ mod tests {
         assert!(enabled, "bool 默认值 true 应生效");
 
         // 分页读取（前端表页签依赖）
-        let page = paginate_table_core(&cfg, "tusk_demo", &tname, 10, 0).await.expect("分页失败");
+        let page = paginate_table_core(&cfg, "tusk_demo", &tname, 10, 0, vec![]).await.expect("分页失败");
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.columns[0].name, "id");
         let id: i64 = page.rows[0][0].as_i64().expect("id 数字");
@@ -2375,7 +2515,7 @@ mod tests {
             .expect("插入失败");
 
         // 分页读取（之前主键查询用单引号 regclass，大写表名会失败）
-        let page = paginate_table_core(&cfg, "tusk_demo", tname, 10, 0)
+        let page = paginate_table_core(&cfg, "tusk_demo", tname, 10, 0, vec![])
             .await
             .expect("大写表分页失败");
         assert_eq!(page.rows.len(), 1);
@@ -2656,6 +2796,148 @@ mod tests {
 
         drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
     }
+
+    #[tokio::test]
+    async fn test_pagination_filter() {
+        let cfg = test_cfg();
+        let tname = format!("tusk_filter_{}", std::process::id());
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "tag".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("建表失败");
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        client
+            .execute(
+                &format!(
+                    "INSERT INTO \"{tname}\" (name, qty, tag) VALUES ('a',1,'x'),('b',2,'x'),('c',3,'y'),('d',4,'y'),('e',5,NULL)"
+                ),
+                &[],
+            )
+            .await
+            .expect("插入失败");
+
+        let f = |column: &str, op: &str, value: Option<&str>| FilterCond {
+            column: column.to_string(),
+            op: op.to_string(),
+            value: value.map(|v| v.to_string()),
+        };
+
+        // 等值
+        let r = paginate_table_core(&cfg, "tusk_demo", &tname, 50, 0, vec![f("name", "=", Some("b"))])
+            .await
+            .expect("筛选失败");
+        assert_eq!(r.total, Some(1), "name=b 应 1 行");
+
+        // 大于等于 + 类型强转（int4）
+        let r = paginate_table_core(&cfg, "tusk_demo", &tname, 50, 0, vec![f("qty", ">=", Some("3"))])
+            .await
+            .expect("筛选失败");
+        assert_eq!(r.total, Some(3), "qty>=3 应 3 行");
+
+        // IS NULL
+        let r = paginate_table_core(&cfg, "tusk_demo", &tname, 50, 0, vec![f("tag", "IS NULL", None)])
+            .await
+            .expect("筛选失败");
+        assert_eq!(r.total, Some(1), "tag IS NULL 应 1 行");
+
+        // LIKE
+        let r = paginate_table_core(&cfg, "tusk_demo", &tname, 50, 0, vec![f("name", "LIKE", Some("%a%"))])
+            .await
+            .expect("筛选失败");
+        assert_eq!(r.total, Some(1), "name LIKE %a% 应 1 行");
+
+        // 多条件 AND
+        let r = paginate_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            50,
+            0,
+            vec![f("qty", ">", Some("1")), f("tag", "=", Some("y"))],
+        )
+        .await
+        .expect("筛选失败");
+        assert_eq!(r.total, Some(2), "qty>1 AND tag=y 应 2 行");
+
+        // 非法列名
+        let err = paginate_table_core(&cfg, "tusk_demo", &tname, 50, 0, vec![f("nope", "=", Some("1"))])
+            .await
+            .expect_err("非法列应报错");
+        assert!(err.contains("nope"), "{err}");
+
+        // 非法运算符
+        let err = paginate_table_core(&cfg, "tusk_demo", &tname, 50, 0, vec![f("qty", "XOR", Some("1"))])
+            .await
+            .expect_err("非法 op 应报错");
+        assert!(!err.is_empty());
+
+        // 空筛选 = 全量
+        let r = paginate_table_core(&cfg, "tusk_demo", &tname, 50, 0, vec![])
+            .await
+            .expect("空筛选失败");
+        assert_eq!(r.total, Some(5));
+
+        drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
+    }
+
+    #[tokio::test]
+    async fn test_export_sql() {
+        let cfg = test_cfg();
+        let tname = format!("tusk_sqlexport_{}", std::process::id());
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("建表失败");
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        client
+            .execute(
+                &format!(
+                    "INSERT INTO \"{tname}\" (name, price) VALUES ('苹果', 12.5), ('O''Brien', NULL), (NULL, 3.14)"
+                ),
+                &[],
+            )
+            .await
+            .expect("插入失败");
+
+        let sql = export_sql_core(&cfg, "tusk_demo", &tname).await.expect("导出失败");
+        assert!(sql.contains(&format!("INSERT INTO \"{tname}\"")), "应有 INSERT: {sql}");
+        assert!(sql.contains("O''Brien"), "引号应转义: {sql}");
+        assert!(sql.contains("NULL"), "NULL 应保留: {sql}");
+        assert!(sql.contains("苹果"), "中文应保留: {sql}");
+        assert!(sql.contains(";"), "应以分号结尾");
+        // 行数：3 行数据（id 自动生成）
+        assert!(sql.matches("INSERT INTO").count() >= 1, "应有 INSERT 语句");
+
+        drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
+    }
+
+    #[tokio::test]
+    async fn test_write_text_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("tusk_write_test_{}.txt", std::process::id()));
+        let p = path.to_str().unwrap().to_string();
+        write_text_file_core(&p, "你好\n第二行").await.expect("写入失败");
+        let content = std::fs::read_to_string(&p).expect("读取失败");
+        assert!(content.contains("你好"), "内容应正确: {content}");
+        std::fs::remove_file(&p).ok();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2686,7 +2968,9 @@ pub fn run() {
             drop_table,
             alter_table,
             duplicate_table,
-            insert_row_vals
+            insert_row_vals,
+            export_sql,
+            write_text_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -285,6 +285,91 @@
     }
   }
 
+  // ===== 数据筛选 =====
+  const FILTER_OPS = ['=', '!=', '>', '<', '>=', '<=', 'LIKE', 'ILIKE', 'IS NULL', 'IS NOT NULL'];
+  let filterSeq = 0;
+
+  function addFilter(raw: QueryTab) {
+    const t = resolveTab(raw);
+    if (!t.filters) t.filters = [];
+    const firstCol = (t.structure ?? [])[0]?.name ?? '';
+    t.filters.push({ id: ++filterSeq, column: firstCol, op: '=', value: '' });
+  }
+
+  function removeFilter(raw: QueryTab, id: number) {
+    const t = resolveTab(raw);
+    t.filters = (t.filters ?? []).filter((f) => f.id !== id);
+  }
+
+  async function applyFilters(raw: QueryTab) {
+    const t = resolveTab(raw);
+    const valid = (t.filters ?? []).filter(
+      (f) =>
+        f.column &&
+        (f.op === 'IS NULL' || f.op === 'IS NOT NULL' || f.value.trim() !== ''),
+    );
+    t.filters = valid;
+    t.filterActive = valid.length > 0;
+    t.page = 1;
+    await loadTablePage(t);
+  }
+
+  function clearFilters(raw: QueryTab) {
+    const t = resolveTab(raw);
+    t.filters = [];
+    t.filterActive = false;
+    t.page = 1;
+    loadTablePage(t);
+  }
+
+  // 导出表数据为 SQL（INSERT 语句）到 ~/Downloads
+  async function exportTableSql(raw: QueryTab) {
+    const t = resolveTab(raw);
+    if (!t.dbname || !t.table) return;
+    t.loading = true;
+    try {
+      const sql = await invoke<string>('export_sql', {
+        connId,
+        dbname: t.dbname,
+        table: t.table,
+      });
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const path = `~/Downloads/tusk-${t.table}-${ts}.sql`;
+      await invoke('write_text_file', { path, content: sql });
+      t.message = `已导出 SQL → ${path}`;
+    } catch (e) {
+      t.error = String(e);
+    }
+    t.loading = false;
+  }
+
+  // 查询结果导出 CSV 到 ~/Downloads
+  async function exportQueryCsv(raw: QueryTab) {
+    const t = resolveTab(raw);
+    const res = t.results?.find((r) => r.rows.length > 0) ?? t.results?.[0];
+    if (!res || !res.columns.length) {
+      t.error = '没有可导出的结果';
+      return;
+    }
+    const esc = (v: unknown) => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [
+      res.columns.map((c) => esc(c.name)).join(','),
+      ...res.rows.map((r) => r.map(esc).join(',')),
+    ];
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const path = `~/Downloads/tusk-query-${ts}.csv`;
+    try {
+      await invoke('write_text_file', { path, content: lines.join('\n') });
+      t.message = `已导出 CSV → ${path}`;
+    } catch (e) {
+      t.error = String(e);
+    }
+  }
+
   // ===== 新增行弹窗（填值插入） =====
   let insertDialog = $state<{
     tabId: number;
@@ -449,6 +534,8 @@
     page?: number;
     pageSize?: number;
     total?: number;
+    filters?: { id: number; column: string; op: string; value: string }[];
+    filterActive?: boolean;
     loading?: boolean;
     structure?: SchemaColumn[];
     // 数据编辑状态
@@ -695,6 +782,13 @@
         table: t.table,
         limit: t.pageSize,
         offset: (t.page! - 1) * t.pageSize!,
+        filters: t.filterActive
+          ? (t.filters ?? []).map((f) => ({
+              column: f.column,
+              op: f.op,
+              value: f.op.startsWith('IS') ? null : f.value.trim() || null,
+            }))
+          : [],
       });
       t.columns = res.columns;
       t.rows = res.rows;
@@ -1248,6 +1342,14 @@
             </div>
 
             <div class="result">
+              {#if activeTab.kind === 'query' && activeTab.results?.length && activeTab.message}
+                <div class="query-msg">✓ {activeTab.message}</div>
+              {/if}
+              {#if activeTab.kind === 'query' && activeTab.results?.some((r) => r.rows.length > 0)}
+                <div class="query-export-bar">
+                  <button onclick={() => exportQueryCsv(activeTab)}>⬇ 导出 CSV</button>
+                </div>
+              {/if}
               {#if activeTab.explainText}
                 <div class="explain-box">
                   <div class="explain-title">📊 执行计划（EXPLAIN ANALYZE）</div>
@@ -1351,6 +1453,40 @@
             {/if}
 
             {#if activeTab.subTab === 'data'}
+              <div class="filter-bar">
+                {#each activeTab.filters ?? [] as f}
+                  <select bind:value={f.column} title="筛选字段">
+                    <option value="">字段…</option>
+                    {#each activeTab.structure ?? [] as c}
+                      <option value={c.name}>{c.name}</option>
+                    {/each}
+                  </select>
+                  <select bind:value={f.op} title="运算符">
+                    {#each FILTER_OPS as op}
+                      <option value={op}>{op}</option>
+                    {/each}
+                  </select>
+                  <input
+                    bind:value={f.value}
+                    placeholder="值（LIKE 用 % 通配）"
+                    disabled={f.op === 'IS NULL' || f.op === 'IS NOT NULL'}
+                  />
+                  <button
+                    class="filter-del"
+                    onclick={() => removeFilter(activeTab, f.id)}
+                    title="删除条件"
+                    >×</button
+                  >
+                {/each}
+                <button onclick={() => addFilter(activeTab)} class="filter-add">＋ 条件</button>
+                <button onclick={() => applyFilters(activeTab)} class="primary filter-apply">
+                  🔍 应用
+                </button>
+                {#if activeTab.filterActive}
+                  <button onclick={() => clearFilters(activeTab)} class="filter-clear">✕ 清除</button>
+                  <span class="filter-on">筛选生效</span>
+                {/if}
+              </div>
               <div class="data-toolbar">
                 <button onclick={() => openInsertDialog(activeTab)} disabled={activeTab.loading}>
                   ＋ 新增行
@@ -1362,6 +1498,9 @@
                 >
                 <button onclick={() => exportTable(activeTab)} disabled={activeTab.loading}>
                   ⬇ 导出 CSV
+                </button>
+                <button onclick={() => exportTableSql(activeTab)} disabled={activeTab.loading}>
+                  ⬇ 导出 SQL
                 </button>
                 <button
                   class="danger"
@@ -2320,6 +2459,33 @@
     opacity: 0.8;
   }
 
+  /* 查询结果导出栏 + 消息 */
+  .query-export-bar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 6px 14px 0;
+  }
+
+  .query-export-bar button {
+    background: #262a33;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #aab2c0;
+    font-size: 12px;
+    padding: 4px 12px;
+    cursor: pointer;
+  }
+
+  .query-export-bar button:hover {
+    border-color: #4fc3f7;
+  }
+
+  .query-msg {
+    color: #4caf50;
+    font-size: 12px;
+    padding: 8px 14px 0;
+  }
+
   /* Explain 执行计划 */
   .explain-box {
     margin: 10px 14px 0;
@@ -2587,6 +2753,75 @@
     color: #4caf50;
     font-size: 12px;
     margin-left: 10px;
+  }
+
+  /* 筛选栏 */
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    background: #161a22;
+    border-bottom: 1px solid #2c303a;
+    flex-wrap: wrap;
+  }
+
+  .filter-bar select {
+    background: #22262f;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #aab2c0;
+    font-size: 12px;
+    padding: 4px 8px;
+  }
+
+  .filter-bar input {
+    background: #1c2029;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #d7dae0;
+    font-size: 12px;
+    padding: 4px 8px;
+    width: 140px;
+  }
+
+  .filter-bar input:disabled {
+    opacity: 0.4;
+  }
+
+  .filter-bar button {
+    background: #262a33;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #aab2c0;
+    font-size: 12px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+
+  .filter-bar button:hover {
+    border-color: #4fc3f7;
+  }
+
+  .filter-bar button.filter-del {
+    padding: 4px 7px;
+    color: #e05656;
+  }
+
+  .filter-bar button.filter-apply {
+    background: #2f6fed;
+    border-color: #2f6fed;
+    color: #fff;
+  }
+
+  .filter-bar button.filter-clear:hover {
+    border-color: #d64545;
+    color: #e05656;
+  }
+
+  .filter-on {
+    color: #4fc3f7;
+    font-size: 12px;
   }
 
   /* 数据页工具栏 */
