@@ -1891,6 +1891,64 @@ mod tests {
             .expect_err("删除不存在表应报错");
         assert!(!err.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_create_table_e2e_frontend_shape() {
+        // 模拟前端设计器完整传参（含 varchar 长度/numeric 精度/默认值/自增主键）
+        let cfg = test_cfg();
+        let tname = format!("tusk_e2e_{}", std::process::id());
+        let cols = vec![
+            ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+            ColumnDef { name: "title".into(), col_type: "varchar(255)".into(), nullable: false, default: None, is_pk: false, is_serial: false },
+            ColumnDef { name: "amount".into(), col_type: "numeric(12,2)".into(), nullable: true, default: Some("0.00".into()), is_pk: false, is_serial: false },
+            ColumnDef { name: "enabled".into(), col_type: "bool".into(), nullable: false, default: Some("true".into()), is_pk: false, is_serial: false },
+            ColumnDef { name: "tags".into(), col_type: "jsonb".into(), nullable: true, default: Some("'[]'::jsonb".into()), is_pk: false, is_serial: false },
+            ColumnDef { name: "created_at".into(), col_type: "timestamptz".into(), nullable: true, default: Some("now()".into()), is_pk: false, is_serial: false },
+        ];
+        create_table_core(&cfg, "tusk_demo", &tname, cols).await.expect("建表失败");
+
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        // 插入完整数据验证所有默认值/类型
+        client
+            .execute(
+                &format!("INSERT INTO \"{tname}\" (title, amount) VALUES ('订单A', 99.50)"),
+                &[],
+            )
+            .await
+            .expect("插入失败");
+        let row = client
+            .query_one(
+                &format!("SELECT title, amount::float8, enabled FROM \"{tname}\""),
+                &[],
+            )
+            .await
+            .expect("查询失败");
+        let title: String = row.get(0);
+        let amount: f64 = row.get::<_, f64>(1);
+        let enabled: bool = row.get(2);
+        assert_eq!(title, "订单A");
+        assert_eq!(amount, 99.5);
+        assert!(enabled, "bool 默认值 true 应生效");
+
+        // 分页读取（前端表页签依赖）
+        let page = paginate_table_core(&cfg, "tusk_demo", &tname, 10, 0).await.expect("分页失败");
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.columns[0].name, "id");
+        let id: i64 = page.rows[0][0].as_i64().expect("id 数字");
+        assert_eq!(id, 1, "自增主键应从 1 开始");
+
+        // 清理
+        drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
+        let exists: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+                &[&tname],
+            )
+            .await
+            .expect("q")
+            .get(0);
+        assert!(!exists, "清理后表不应存在");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
