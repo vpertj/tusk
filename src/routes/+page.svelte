@@ -287,6 +287,7 @@
 
   // ===== 新增行弹窗（填值插入） =====
   let insertDialog = $state<{
+    tabId: number;
     cols: SchemaColumn[];
     values: Record<string, string>;
     err: string;
@@ -309,13 +310,18 @@
         values[c.name] = '';
       }
     }
-    insertDialog = { cols, values, err: '' };
+    insertDialog = { tabId: t.id, cols, values, err: '' };
   }
 
-  async function doInsertRow(raw: QueryTab) {
+  async function doInsertRow() {
     const d = insertDialog;
-    const t = resolveTab(raw);
-    if (!d || !t) return;
+    if (!d) return;
+    // 用弹窗打开时的表（用户可能已切换标签）
+    const t = resolveTab({ id: d.tabId } as QueryTab);
+    if (!t || t.kind !== 'table' || !t.dbname || !t.table) {
+      d.err = '目标表已关闭，请重新打开后重试';
+      return;
+    }
     const vals = d.cols
       .filter((c) => (d.values[c.name] ?? '').trim() !== '')
       .map((c) => ({ name: c.name, value: d.values[c.name].trim() }));
@@ -331,6 +337,10 @@
         values: vals,
       });
       insertDialog = null;
+      // 跳到最后一页（新行在主键排序末尾）再刷新
+      await loadTablePage(t);
+      const lastPage = Math.max(1, Math.ceil((t.total ?? 1) / t.pageSize!));
+      t.page = lastPage;
       await loadTablePage(t);
       t.message = `已插入第 ${newId} 行`;
     } catch (e) {
@@ -898,6 +908,7 @@
     if (!t || !connId || !t.sql.trim()) return;
     t.running = true;
     t.error = '';
+    t.explainText = undefined; // 执行新查询时清掉旧执行计划
     const t0 = performance.now();
     try {
       const res = await invoke<{ results: QueryResultView[] }>('query', {
@@ -1328,7 +1339,10 @@
               >
               <span class="subtab-spacer"></span>
               <span class="subtab-hint"
-                >{activeTab.dbname}.{activeTab.table} · 每页 {activeTab.pageSize} 行</span
+                >{activeTab.dbname}.{activeTab.table} · 每页 {activeTab.pageSize} 行
+                {#if activeTab.message}
+                  <span class="ok-msg">✓ {activeTab.message}</span>
+                {/if}</span
               >
             </div>
 
@@ -1652,7 +1666,7 @@
           {/each}
           <div class="field-actions" style="margin-top:16px">
             <button onclick={() => (insertDialog = null)}>取消</button>
-            <button onclick={() => doInsertRow(activeTab)} class="primary">插入</button>
+            <button onclick={doInsertRow} class="primary">插入</button>
           </div>
         </div>
       </div>
@@ -2567,6 +2581,12 @@
   .struct-toolbar button:hover {
     border-color: #4fc3f7;
     color: #d7dae0;
+  }
+
+  .ok-msg {
+    color: #4caf50;
+    font-size: 12px;
+    margin-left: 10px;
   }
 
   /* 数据页工具栏 */
