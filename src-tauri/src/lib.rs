@@ -426,6 +426,66 @@ async fn list_tables_core(cfg: &ConnConfig, dbname: &str) -> Result<Vec<TableInf
         .collect())
 }
 
+/// 核心：列出表的索引（排除主键索引，主键已在结构里显示）
+#[derive(Serialize, Debug)]
+struct IndexInfo {
+    name: String,
+    columns: String,
+    is_unique: bool,
+}
+
+async fn list_indexes_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    table: &str,
+) -> Result<Vec<IndexInfo>, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    // relname 是裸表名（不需要引号包裹），转义单引号防注入
+    let tbl_lit = table.replace('\'', "''");
+    let sql = format!(
+        "SELECT i.relname,
+                COALESCE((SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
+                          FROM unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord)
+                          JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = k.attnum
+                          WHERE k.attnum > 0), ''),
+                ix.indisunique
+         FROM pg_index ix
+         JOIN pg_class i ON i.oid = ix.indexrelid
+         JOIN pg_class t ON t.oid = ix.indrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         WHERE t.relname = '{tbl_lit}' AND n.nspname = 'public' AND NOT ix.indisprimary
+         ORDER BY i.relname"
+    );
+    let rows = client
+        .query(&sql, &[])
+        .await
+        .map_err(|e| format!("查询索引失败: {e}"))?;
+    Ok(rows
+        .iter()
+        .map(|r| IndexInfo {
+            name: r.get(0),
+            columns: r.get(1),
+            is_unique: r.get(2),
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn list_indexes(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+) -> Result<Vec<IndexInfo>, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    list_indexes_core(&cfg, &dbname, &table).await
+}
+
 /// 核心：创建视图（只允许 SELECT，防注入）
 async fn create_view_core(
     cfg: &ConnConfig,
@@ -3077,6 +3137,41 @@ mod tests {
 
         drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
     }
+
+    #[tokio::test]
+    async fn test_indexes() {
+        let cfg = test_cfg();
+        let tname = format!("tusk_idx_{}", std::process::id());
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "email".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "tag".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("建表失败");
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        client
+            .execute(&format!("CREATE UNIQUE INDEX idx_{tname}_email ON \"{tname}\" (email)"), &[])
+            .await
+            .expect("建索引失败");
+        client
+            .execute(&format!("CREATE INDEX idx_{tname}_tag ON \"{tname}\" (tag)"), &[])
+            .await
+            .expect("建索引2失败");
+
+        let idxs = list_indexes_core(&cfg, "tusk_demo", &tname).await.expect("索引列表失败");
+        assert_eq!(idxs.len(), 2, "应有 2 个索引（主键索引排除）: {:?}", idxs.iter().map(|i| &i.name).collect::<Vec<_>>());
+        let email = idxs.iter().find(|i| i.name.contains("email")).expect("email 索引");
+        assert!(email.is_unique, "email 索引应唯一");
+        assert!(email.columns.contains("email"), "列应为 email: {}", email.columns);
+
+        drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3111,7 +3206,8 @@ pub fn run() {
             export_sql,
             write_text_file,
             create_view,
-            drop_view
+            drop_view,
+            list_indexes
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

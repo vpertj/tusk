@@ -101,6 +101,11 @@
     default: string | null;
     is_pk: boolean;
   }
+  interface IndexInfo {
+    name: string;
+    columns: string;
+    is_unique: boolean;
+  }
   let dbs = $state<DatabaseInfo[]>([]);
 
   // ===== 表设计器（建表） =====
@@ -581,6 +586,7 @@
     filterActive?: boolean;
     loading?: boolean;
     structure?: SchemaColumn[];
+    indexes?: IndexInfo[];
     // 数据编辑状态
     selectedRowIdx?: number | null;
     editingCell?: { rowIdx: number; colIdx: number } | null;
@@ -876,6 +882,11 @@
     if (t.structure) return;
     try {
       t.structure = await invoke<SchemaColumn[]>('list_columns', {
+        connId,
+        dbname: t.dbname,
+        table: t.table,
+      });
+      t.indexes = await invoke<IndexInfo[]>('list_indexes', {
         connId,
         dbname: t.dbname,
         table: t.table,
@@ -1711,6 +1722,31 @@
                   </table>
                 </div>
                 <div class="count">共 {(activeTab.structure ?? []).length} 个字段</div>
+                <div class="idx-title">索引（{(activeTab.indexes ?? []).length}）</div>
+                {#if (activeTab.indexes ?? []).length === 0}
+                  <div class="idx-empty">无索引（主键除外）</div>
+                {:else}
+                  <div class="table-wrap">
+                    <table class="struct-table">
+                      <thead>
+                        <tr>
+                          <th>索引名</th>
+                          <th>列</th>
+                          <th>唯一</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {#each activeTab.indexes ?? [] as ix}
+                          <tr>
+                            <td>{ix.name}</td>
+                            <td>{ix.columns}</td>
+                            <td>{ix.is_unique ? '✅' : '—'}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  </div>
+                {/if}
               </div>
             {:else}
               <div class="result">
@@ -2990,6 +3026,20 @@
   .filter-on {
     color: #4fc3f7;
     font-size: 12px;
+  }
+
+  .idx-title {
+    color: #aab2c0;
+    font-size: 12px;
+    padding: 14px 0 6px;
+    border-top: 1px solid #2c303a;
+    margin-top: 14px;
+  }
+
+  .idx-empty {
+    color: #5c6472;
+    font-size: 12px;
+    padding: 4px 0;
   }
 
   /* 数据页工具栏 */
