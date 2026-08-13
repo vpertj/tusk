@@ -111,6 +111,11 @@
     total?: number;
     loading?: boolean;
     structure?: SchemaColumn[];
+    // 数据编辑状态
+    selectedRowIdx?: number | null;
+    editingCell?: { rowIdx: number; colIdx: number } | null;
+    editValue?: string;
+    exportMsg?: string;
   }
   let tabs = $state<QueryTab[]>([]);
   let activeTabId = $state(0);
@@ -316,10 +321,15 @@
       total: 0,
       loading: false,
       structure: undefined,
+      selectedRowIdx: null,
+      editingCell: null,
+      editValue: '',
+      exportMsg: '',
     };
     tabs.push(t);
     activeTabId = t.id;
     loadTablePage(t);
+    loadStructure(t);
   }
 
   // 从 tabs 取响应式 proxy 引用（push 进 $state 数组的元素会被深代理，
@@ -395,6 +405,114 @@
     if (t.total! > t.page! * t.pageSize!) {
       t.page!++;
       loadTablePage(t);
+    }
+  }
+
+  // ================= 数据编辑 =================
+  let editInput: HTMLInputElement | null = $state(null);
+
+  $effect(() => {
+    if (activeTab?.editingCell && editInput) {
+      editInput.focus();
+      editInput.select();
+    }
+  });
+
+  // 主键列名（编辑/删除依赖主键定位行）
+  function pkNames(t: QueryTab): string[] {
+    return (t.structure ?? []).filter((c) => c.is_pk).map((c) => c.name);
+  }
+
+  function canEdit(t: QueryTab): boolean {
+    return pkNames(t).length > 0;
+  }
+
+  function selectRow(t: QueryTab, idx: number) {
+    t.selectedRowIdx = idx;
+  }
+
+  function startEdit(t: QueryTab, rowIdx: number, colIdx: number) {
+    if (!canEdit(t)) return;
+    t.editingCell = { rowIdx, colIdx };
+    t.editValue = cellText(t.rows[rowIdx][colIdx]);
+    t.selectedRowIdx = rowIdx;
+  }
+
+  async function commitEdit(raw: QueryTab) {
+    const t = resolveTab(raw);
+    const cell = t.editingCell;
+    if (!cell) return;
+    t.editingCell = null;
+    const col = t.columns[cell.colIdx];
+    const pkCols = pkNames(t);
+    if (!col || pkCols.length === 0) return;
+    const pkVals = pkCols.map((c) => {
+      const ci = t.columns.findIndex((x) => x.name === c);
+      return cellText(t.rows[cell.rowIdx][ci]);
+    });
+    const value = t.editValue?.trim() === '' ? null : t.editValue;
+    try {
+      await invoke('update_cell', {
+        connId,
+        dbname: t.dbname,
+        table: t.table,
+        pkCols,
+        pkVals,
+        col: col.name,
+        colType: col.type_name,
+        value,
+      });
+      await loadTablePage(t);
+    } catch (e) {
+      t.error = String(e);
+    }
+  }
+
+  async function addRow(raw: QueryTab) {
+    const t = resolveTab(raw);
+    try {
+      await invoke('insert_row', { connId, dbname: t.dbname, table: t.table });
+      await loadTablePage(t);
+    } catch (e) {
+      t.error = String(e);
+    }
+  }
+
+  async function removeRow(raw: QueryTab) {
+    const t = resolveTab(raw);
+    if (t.selectedRowIdx === null || t.selectedRowIdx === undefined) return;
+    const pkCols = pkNames(t);
+    if (pkCols.length === 0) return;
+    const pkVals = pkCols.map((c) => {
+      const ci = t.columns.findIndex((x) => x.name === c);
+      return cellText(t.rows[t.selectedRowIdx!][ci]);
+    });
+    try {
+      await invoke('delete_row', {
+        connId,
+        dbname: t.dbname,
+        table: t.table,
+        pkCols,
+        pkVals,
+      });
+      t.selectedRowIdx = null;
+      await loadTablePage(t);
+    } catch (e) {
+      t.error = String(e);
+    }
+  }
+
+  async function exportTable(raw: QueryTab) {
+    const t = resolveTab(raw);
+    try {
+      const path = await invoke<string>('export_csv', {
+        connId,
+        dbname: t.dbname,
+        table: t.table,
+      });
+      t.exportMsg = `已导出 CSV：${path}`;
+    } catch (e) {
+      t.error = String(e);
     }
   }
 
@@ -843,7 +961,29 @@
             {/if}
 
             {#if activeTab.subTab === 'data'}
+              <div class="data-toolbar">
+                <button onclick={() => addRow(activeTab)} disabled={activeTab.loading}>
+                  ＋ 新增行
+                </button>
+                <button
+                  onclick={() => removeRow(activeTab)}
+                  disabled={!canEdit(activeTab) || activeTab.selectedRowIdx === null || activeTab.loading}
+                  >🗑 删除行</button
+                >
+                <button onclick={() => exportTable(activeTab)} disabled={activeTab.loading}>
+                  ⬇ 导出 CSV
+                </button>
+                <button onclick={() => loadTablePage(activeTab)} disabled={activeTab.loading}>
+                  ⟳ 刷新
+                </button>
+                <span class="toolbar-hint">
+                  {canEdit(activeTab) ? '双击单元格编辑 · 点击行选中' : '无主键表仅可新增/导出'}
+                </span>
+              </div>
               <div class="result">
+                {#if activeTab.exportMsg}
+                  <div class="ok">✓ {activeTab.exportMsg}</div>
+                {/if}
                 {#if activeTab.columns.length > 0}
                   <div class="table-wrap">
                     <table>
@@ -864,10 +1004,34 @@
                         </tr>
                       </thead>
                       <tbody>
-                        {#each activeTab.rows as row}
-                          <tr>
-                            {#each row as cell}
-                              <td class:null={isNull(cell)}>{cellText(cell)}</td>
+                        {#each activeTab.rows as row, rowIdx}
+                          <tr
+                            class:selected={activeTab.selectedRowIdx === rowIdx}
+                            onclick={() => selectRow(activeTab, rowIdx)}
+                          >
+                            {#each row as cell, colIdx}
+                              <td
+                                class:null={isNull(cell)}
+                                ondblclick={() => startEdit(activeTab, rowIdx, colIdx)}
+                              >
+                                {#if activeTab.editingCell?.rowIdx === rowIdx && activeTab.editingCell?.colIdx === colIdx}
+                                  <input
+                                    bind:this={editInput}
+                                    bind:value={activeTab.editValue}
+                                    class="cell-input"
+                                    onkeydown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.stopPropagation();
+                                        commitEdit(activeTab);
+                                      } else if (e.key === 'Escape') {
+                                        activeTab.editingCell = null;
+                                      }
+                                    }}
+                                  />
+                                {:else}
+                                  {cellText(cell)}
+                                {/if}
+                              </td>
                             {/each}
                           </tr>
                         {/each}
@@ -1452,6 +1616,68 @@
   .tab-ico {
     font-size: 11px;
     opacity: 0.8;
+  }
+
+  /* 数据页工具栏 */
+  .data-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: #171a20;
+    border-bottom: 1px solid #2c303a;
+  }
+
+  .data-toolbar button {
+    background: #262a33;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #aab2c0;
+    padding: 4px 12px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .data-toolbar button:hover:not(:disabled) {
+    border-color: #4fc3f7;
+    color: #d7dae0;
+  }
+
+  .data-toolbar button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .toolbar-hint {
+    margin-left: auto;
+    color: #5c6472;
+    font-size: 11px;
+  }
+
+  /* 单元格编辑输入框 */
+  .cell-input {
+    background: #1b1e25;
+    border: 1px solid #4fc3f7;
+    border-radius: 4px;
+    color: #d7dae0;
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 12px;
+    padding: 2px 6px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .cell-input:focus {
+    outline: none;
+  }
+
+  /* 选中行 */
+  tbody tr.selected {
+    background: #24324a;
+  }
+
+  tbody tr.selected:hover {
+    background: #2a3b58;
   }
 
   /* 表页签子标签栏 */

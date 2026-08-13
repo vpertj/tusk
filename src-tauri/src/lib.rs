@@ -746,6 +746,243 @@ async fn connect_saved(state: State<'_, AppState>, name: String) -> Result<Conne
     Ok(ConnectionInfo { id, version })
 }
 
+// ================= 数据编辑（行操作 + CSV 导出） =================
+
+/// 标识符双引号转义（防注入）
+fn quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// 核心：更新单元格。值以文本传输，SQL 侧 CAST 到目标类型；
+/// 主键用 ::text 比较（主键值即单元格文本）。
+/// value = None 表示置 NULL。
+async fn update_cell_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    table: &str,
+    pk_cols: Vec<String>,
+    pk_vals: Vec<String>,
+    col: String,
+    col_type: String,
+    value: Option<String>,
+) -> Result<u64, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+
+    let mut sql = format!(
+        "UPDATE {} SET {} = ",
+        quote_ident(table),
+        quote_ident(&col)
+    );
+    let mut params: Vec<String> = Vec::new();
+    match &value {
+        Some(v) => {
+            // ($1)::text::<type>：强制 $1 按 text 传输，服务器端再转目标类型
+            sql.push_str(&format!("($1)::text::{col_type}"));
+            params.push(v.clone());
+        }
+        None => sql.push_str("NULL"),
+    }
+    let param_offset = if value.is_some() { 1 } else { 0 }; // value 占 $1（NULL 时无参数）
+    sql.push_str(" WHERE ");
+    for (i, pk) in pk_cols.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(" AND ");
+        }
+        sql.push_str(&format!("{}::text = ${}", quote_ident(pk), i + 1 + param_offset));
+        params.push(pk_vals[i].clone());
+    }
+
+    let params_ref: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+        params.iter().map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+    let stmt = client
+        .prepare(&sql)
+        .await
+        .map_err(|e| format!("SQL 预编译失败: {e}"))?;
+    client
+        .execute(&stmt, &params_ref)
+        .await
+        .map_err(|e| format!("更新失败: {e}"))
+}
+
+/// 核心：删除行（按主键定位）
+async fn delete_row_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    table: &str,
+    pk_cols: Vec<String>,
+    pk_vals: Vec<String>,
+) -> Result<u64, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+
+    let mut sql = format!("DELETE FROM {} WHERE ", quote_ident(table));
+    let mut params: Vec<String> = Vec::new();
+    for (i, pk) in pk_cols.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(" AND ");
+        }
+        sql.push_str(&format!("{}::text = ${}", quote_ident(pk), i + 1));
+        params.push(pk_vals[i].clone());
+    }
+    let params_ref: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+        params.iter().map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+    let stmt = client
+        .prepare(&sql)
+        .await
+        .map_err(|e| format!("SQL 预编译失败: {e}"))?;
+    client
+        .execute(&stmt, &params_ref)
+        .await
+        .map_err(|e| format!("删除失败: {e}"))
+}
+
+/// 核心：插入一行（默认值）。有 id 列时返回新 id，否则返回 0
+async fn insert_row_core(cfg: &ConnConfig, dbname: &str, table: &str) -> Result<i32, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    let qtable = quote_ident(table);
+    let sql = format!("INSERT INTO {qtable} DEFAULT VALUES RETURNING id");
+    match client.query_one(&sql, &[]).await {
+        Ok(row) => Ok(row.get::<_, i32>(0)),
+        Err(_) => {
+            // 表没有 id 返回列：退化为无返回插入
+            let sql2 = format!("INSERT INTO {qtable} DEFAULT VALUES");
+            client
+                .execute(&sql2, &[])
+                .await
+                .map_err(|e| format!("插入失败: {e}"))?;
+            Ok(0)
+        }
+    }
+}
+
+/// CSV 字段转义：含逗号/引号/换行时用双引号包裹，引号翻倍
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// 核心：导出整表为 CSV 到 ~/Downloads，返回文件路径
+async fn export_csv_core(cfg: &ConnConfig, dbname: &str, table: &str) -> Result<String, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    let qtable = quote_ident(table);
+    let stmt = client
+        .prepare(&format!("SELECT * FROM {qtable}"))
+        .await
+        .map_err(|e| format!("SQL 预编译失败: {e}"))?;
+    let rows = client
+        .query(&stmt, &[])
+        .await
+        .map_err(|e| format!("查询失败: {e}"))?;
+
+    let mut csv = String::new();
+    // 表头
+    let header: Vec<String> = stmt
+        .columns()
+        .iter()
+        .map(|c| csv_escape(c.name()))
+        .collect();
+    csv.push_str(&header.join(","));
+    csv.push('\n');
+    // 数据行
+    for row in &rows {
+        let vals: Vec<String> = (0..row.len())
+            .map(|i| {
+                let v = cell_to_json(row, i);
+                match v {
+                    serde_json::Value::Null => String::new(),
+                    serde_json::Value::String(s) => csv_escape(&s),
+                    other => csv_escape(&other.to_string()),
+                }
+            })
+            .collect();
+        csv.push_str(&vals.join(","));
+        csv.push('\n');
+    }
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = format!("{home}/Downloads/tusk-{table}-{ts}.csv");
+    std::fs::write(&path, csv).map_err(|e| format!("写文件失败: {e}"))?;
+    Ok(path)
+}
+
+/// 更新单元格（Tauri command 入口）
+#[tauri::command]
+async fn update_cell(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+    pk_cols: Vec<String>,
+    pk_vals: Vec<String>,
+    col: String,
+    col_type: String,
+    value: Option<String>,
+) -> Result<u64, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    update_cell_core(&cfg, &dbname, &table, pk_cols, pk_vals, col, col_type, value).await
+}
+
+/// 删除行（Tauri command 入口）
+#[tauri::command]
+async fn delete_row(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+    pk_cols: Vec<String>,
+    pk_vals: Vec<String>,
+) -> Result<u64, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    delete_row_core(&cfg, &dbname, &table, pk_cols, pk_vals).await
+}
+
+/// 插入行（Tauri command 入口）
+#[tauri::command]
+async fn insert_row(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+) -> Result<i32, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    insert_row_core(&cfg, &dbname, &table).await
+}
+
+/// 导出 CSV（Tauri command 入口）
+#[tauri::command]
+async fn export_csv(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+) -> Result<String, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    export_csv_core(&cfg, &dbname, &table).await
+}
+
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
 /// 这里自定义解码（PostgreSQL wire format，精度无损）
 struct NumericString(String);
@@ -1147,6 +1384,139 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::env::remove_var("TUSK_CONNS_DIR");
     }
+
+    #[tokio::test]
+    async fn test_row_operations() {
+        let cfg = test_cfg();
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+
+        // 测试专用表：所有列都有默认值，DEFAULT VALUES 可成功插入
+        client
+            .execute(
+                "CREATE TABLE IF NOT EXISTS tusk_edit_test (
+                    id serial PRIMARY KEY,
+                    name text NOT NULL DEFAULT 'x',
+                    price numeric(10,2) NOT NULL DEFAULT 0,
+                    note bytea
+                )",
+                &[],
+            )
+            .await
+            .expect("建测试表失败");
+
+        // 插入一行（DEFAULT VALUES，serial 主键自动生成）
+        let new_id = insert_row_core(&cfg, "tusk_demo", "tusk_edit_test")
+            .await
+            .expect("插入失败");
+        assert!(new_id > 0, "应返回新行 id");
+
+        // 更新该行 name（text 列）
+        update_cell_core(
+            &cfg,
+            "tusk_demo",
+            "tusk_edit_test",
+            vec!["id".into()],
+            vec![new_id.to_string()],
+            "name".into(),
+            "text".into(),
+            Some("测试商品".into()),
+        )
+        .await
+        .expect("更新失败");
+        let name: String = client
+            .query_one(
+                "SELECT name FROM tusk_edit_test WHERE id = $1",
+                &[&new_id],
+            )
+            .await
+            .expect("查询失败")
+            .get(0);
+        assert_eq!(name, "测试商品");
+
+        // 更新 price（numeric 列，text 强转）
+        update_cell_core(
+            &cfg,
+            "tusk_demo",
+            "tusk_edit_test",
+            vec!["id".into()],
+            vec![new_id.to_string()],
+            "price".into(),
+            "numeric".into(),
+            Some("88.50".into()),
+        )
+        .await
+        .expect("numeric 更新失败");
+        let price: f64 = client
+            .query_one(
+                "SELECT price::float8 FROM tusk_edit_test WHERE id = $1",
+                &[&new_id],
+            )
+            .await
+            .expect("查询失败")
+            .get(0);
+        assert_eq!(price, 88.5);
+
+        // 更新为 NULL
+        update_cell_core(
+            &cfg,
+            "tusk_demo",
+            "tusk_edit_test",
+            vec!["id".into()],
+            vec![new_id.to_string()],
+            "note".into(),
+            "bytea".into(),
+            None,
+        )
+        .await
+        .expect("置空失败");
+        let note: Option<Vec<u8>> = client
+            .query_one(
+                "SELECT note FROM tusk_edit_test WHERE id = $1",
+                &[&new_id],
+            )
+            .await
+            .expect("查询失败")
+            .get(0);
+        assert!(note.is_none());
+
+        // 删除该行
+        delete_row_core(
+            &cfg,
+            "tusk_demo",
+            "tusk_edit_test",
+            vec!["id".into()],
+            vec![new_id.to_string()],
+        )
+        .await
+        .expect("删除失败");
+        let cnt: i64 = client
+            .query_one(
+                "SELECT count(*) FROM tusk_edit_test WHERE id = $1",
+                &[&new_id],
+            )
+            .await
+            .expect("查询失败")
+            .get(0);
+        assert_eq!(cnt, 0, "删除后应无此行");
+    }
+
+    #[tokio::test]
+    async fn test_export_csv() {
+        let cfg = test_cfg();
+        let path = export_csv_core(&cfg, "tusk_demo", "products")
+            .await
+            .expect("导出失败");
+        assert!(std::path::Path::new(&path).exists(), "CSV 文件应存在: {path}");
+        let content = std::fs::read_to_string(&path).expect("读文件失败");
+        assert!(
+            content.starts_with("id,name,price"),
+            "表头应为 id,name,price... 实际: {}",
+            content.lines().next().unwrap_or("")
+        );
+        assert!(content.contains("机械键盘"), "应包含已有数据");
+        assert!(content.contains("测试商品") == false, "不应包含已删除数据");
+        std::fs::remove_file(&path).ok();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1167,7 +1537,11 @@ pub fn run() {
             save_connection,
             list_connections,
             delete_connection,
-            connect_saved
+            connect_saved,
+            update_cell,
+            delete_row,
+            insert_row,
+            export_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
