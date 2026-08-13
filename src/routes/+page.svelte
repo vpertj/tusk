@@ -131,6 +131,7 @@
   let editingTable = $state<{ db: string; table: string } | null>(null);
   let designerDb = $state('');
   let designerName = $state('');
+  let designerComment = $state('');
   let designerError = $state('');
   let designerSeq = 0;
   interface DesignerCol {
@@ -140,12 +141,13 @@
     length: string;
     nullable: boolean;
     default: string;
+    comment: string;
     isPk: boolean;
     isSerial: boolean;
   }
   let designerCols = $state<DesignerCol[]>([
-    { id: 1, name: 'id', baseType: 'serial', length: '', nullable: false, default: '', isPk: true, isSerial: true },
-    { id: 2, name: 'name', baseType: 'text', length: '', nullable: false, default: '', isPk: false, isSerial: false },
+    { id: 1, name: 'id', baseType: 'serial', length: '', nullable: false, default: '', isPk: true, isSerial: true, comment: '' },
+    { id: 2, name: 'name', baseType: 'text', length: '', nullable: false, default: '', isPk: false, isSerial: false, comment: '' },
   ]);
 
   function openDesigner() {
@@ -154,8 +156,8 @@
     designerName = '';
     designerError = '';
     designerCols = [
-      { id: ++designerSeq, name: 'id', baseType: 'serial', length: '', nullable: false, default: '', isPk: true, isSerial: true },
-      { id: ++designerSeq, name: 'name', baseType: 'text', length: '', nullable: false, default: '', isPk: false, isSerial: false },
+      { id: ++designerSeq, name: 'id', baseType: 'serial', length: '', nullable: false, default: '', isPk: true, isSerial: true, comment: '' },
+      { id: ++designerSeq, name: 'name', baseType: 'text', length: '', nullable: false, default: '', isPk: false, isSerial: false, comment: '' },
     ];
     showDesigner = true;
   }
@@ -167,6 +169,7 @@
       editingTable = { db, table };
       designerDb = db;
       designerName = table;
+      designerComment = '';
       designerError = '';
       const typeMap: Record<string, string> = {
         int4: 'int4', int8: 'int8', text: 'text', varchar: 'varchar', numeric: 'numeric',
@@ -194,6 +197,7 @@
           length,
           nullable: c.is_nullable === 'YES',
           default: isSerial ? '' : (c.default ?? ''),
+          comment: c.comment ?? '',
           isPk: c.is_pk,
           isSerial,
         };
@@ -207,7 +211,7 @@
   function addDesignerCol() {
     designerCols = [
       ...designerCols,
-      { id: ++designerSeq, name: '', baseType: 'text', length: '', nullable: true, default: '', isPk: false, isSerial: false },
+      { id: ++designerSeq, name: '', baseType: 'text', length: '', nullable: true, default: '', isPk: false, isSerial: false, comment: '' },
     ];
   }
 
@@ -232,6 +236,7 @@
       col_type: buildColType(c),
       nullable: c.nullable,
       default: c.default.trim() === '' ? null : c.default.trim(),
+      comment: c.comment.trim() === '' ? null : c.comment.trim(),
       is_pk: c.isPk,
       is_serial: c.isSerial || c.baseType === 'serial' || c.baseType === 'bigserial',
     }));
@@ -246,6 +251,7 @@
           dbname: editingTable.db,
           table: editingTable.table,
           columns: cols,
+          tableComment: designerComment.trim() === '' ? null : designerComment.trim(),
         });
         // 刷新已打开的表页签（结构 + 数据）
         const openTab = tabs.find(
@@ -270,6 +276,7 @@
           dbname: designerDb,
           table: designerName.trim(),
           columns: cols,
+          tableComment: designerComment.trim() === '' ? null : designerComment.trim(),
         });
         await refreshTables(designerDb);
         openTableTab(designerDb, designerName.trim());
@@ -1793,6 +1800,14 @@
             />
           </div>
           <div class="field">
+            <label for="d-tcmt">表注释</label>
+            <input
+              id="d-tcmt"
+              bind:value={designerComment}
+              placeholder={editingTable ? '留空则不修改现有注释' : '表注释（可选）'}
+            />
+          </div>
+          <div class="field">
             <label for="d-db">数据库</label>
             <select id="d-db" bind:value={designerDb} disabled={!!editingTable}>
               {#each dbs as db}
@@ -1810,6 +1825,7 @@
               <span class="dg-len">长度/精度</span>
               <span class="dg-null">可空</span>
               <span class="dg-def">默认值</span>
+              <span class="dg-cmt">注释</span>
               <span class="dg-del"></span>
             </div>
             {#each designerCols as c}
@@ -1865,6 +1881,9 @@
                 </span>
                 <span class="dg-def">
                   <input bind:value={c.default} placeholder="now() / 0 / 'x'" />
+                </span>
+                <span class="dg-cmt">
+                  <input bind:value={c.comment} placeholder="字段注释" />
                 </span>
                 <span class="dg-del">
                   <button onclick={() => delDesignerCol(c.id)}>×</button>
@@ -2877,6 +2896,11 @@
   .dg-def {
     flex: 1.1;
     min-width: 80px;
+  }
+
+  .dg-cmt {
+    flex: 1.2;
+    min-width: 90px;
   }
 
   .dg-del {
