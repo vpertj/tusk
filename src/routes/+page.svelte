@@ -66,12 +66,20 @@
   let loadingKey = $state('');
 
   // ================= 标签页工作区 =================
+  interface QueryResultView {
+    columns: { name: string; type_name: string }[];
+    rows: unknown[][];
+    affected: number | null;
+    error: string;
+  }
+
   interface QueryTab {
     id: number;
     kind: 'query' | 'table';
     title: string;
     // 查询标签字段
     sql: string;
+    results: QueryResultView[];
     columns: { name: string; type_name: string }[];
     rows: unknown[][];
     affected: number | null;
@@ -99,6 +107,7 @@
       kind: 'query',
       title: `查询 ${tabSeq - 1}`,
       sql,
+      results: [],
       columns: [],
       rows: [],
       affected: null,
@@ -231,6 +240,7 @@
       kind: 'table',
       title: table,
       sql: '',
+      results: [],
       columns: [],
       rows: [],
       affected: null,
@@ -341,6 +351,25 @@
     activeTabId = q.id;
   }
 
+  // ================= SQL 历史（localStorage，最近 50 条） =================
+  let sqlHistory = $state<string[]>([]);
+  let histIdx = $state(-1);
+
+  try {
+    const raw = localStorage.getItem('tusk.sqlHistory');
+    if (raw) sqlHistory = JSON.parse(raw);
+  } catch {
+    sqlHistory = [];
+  }
+
+  function saveHistory(sqlText: string) {
+    const s = sqlText.trim();
+    if (!s) return;
+    sqlHistory = [s, ...sqlHistory.filter((x) => x !== s)].slice(0, 50);
+    localStorage.setItem('tusk.sqlHistory', JSON.stringify(sqlHistory));
+    histIdx = -1;
+  }
+
   // ================= 查询 =================
   async function runQuery(tab?: QueryTab) {
     const t = tab ?? activeTab;
@@ -349,20 +378,14 @@
     t.error = '';
     const t0 = performance.now();
     try {
-      const res = await invoke<{
-        columns: { name: string; type_name: string }[];
-        rows: unknown[][];
-        rows_affected: number | null;
-      }>('query', { connId, sql: t.sql });
-      t.columns = res.columns;
-      t.rows = res.rows;
-      t.affected = res.rows_affected;
-      t.colWidths = {}; // 新结果集重置列宽
+      const res = await invoke<{ results: QueryResultView[] }>('query', {
+        connId,
+        sql: t.sql,
+      });
+      t.results = res.results;
+      saveHistory(t.sql);
     } catch (e) {
-      t.error = String(e);
-      t.columns = [];
-      t.rows = [];
-      t.affected = null;
+      t.results = [{ columns: [], rows: [], affected: null, error: String(e) }];
     }
     t.elapsed = performance.now() - t0;
     t.running = false;
@@ -407,6 +430,21 @@
     } else if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
       e.preventDefault();
       openNewTab();
+    } else if ((e.metaKey || e.ctrlKey) && e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (histIdx < sqlHistory.length - 1) {
+        histIdx++;
+        if (activeTab) activeTab.sql = sqlHistory[histIdx];
+      }
+    } else if ((e.metaKey || e.ctrlKey) && e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (histIdx > 0) {
+        histIdx--;
+        if (activeTab) activeTab.sql = sqlHistory[histIdx];
+      } else if (histIdx === 0) {
+        histIdx = -1;
+        if (activeTab) activeTab.sql = '';
+      }
     }
   }
 </script>
@@ -575,48 +613,55 @@
             </div>
 
             <div class="result">
-              {#if activeTab.error}
-                <div class="error">⚠ {activeTab.error}</div>
-              {/if}
-              {#if activeTab.affected !== null}
-                <div class="ok">✓ 影响行数：{activeTab.affected}</div>
-              {/if}
-              {#if activeTab.columns.length > 0}
-                <div class="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        {#each activeTab.columns as col}
-                          <th
-                            style={activeTab.colWidths[col.name] ? `width:${activeTab.colWidths[col.name]}` : ''}
-                          >
-                            {col.name}<small>{col.type_name}</small>
-                            <span
-                              class="resizer"
-                              role="presentation"
-                              onmousedown={(e) => startResize(e, activeTab, col.name)}
-                            ></span>
-                          </th>
-                        {/each}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {#each activeTab.rows as row, ri}
-                        <tr>
-                          {#each row as cell}
-                            <td class:null={isNull(cell)}>{cellText(cell)}</td>
+              {#each activeTab.results as res, ri}
+                <div class="result-block">
+                  {#if res.error}
+                    <div class="error">⚠ {res.error}</div>
+                  {/if}
+                  {#if res.affected !== null}
+                    <div class="ok">✓ 第 {ri + 1} 条：影响 {res.affected} 行</div>
+                  {/if}
+                  {#if res.columns.length > 0}
+                    <div class="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            {#each res.columns as col}
+                              <th
+                                style={activeTab.colWidths[col.name] ? `width:${activeTab.colWidths[col.name]}` : ''}
+                              >
+                                {col.name}<small>{col.type_name}</small>
+                                <span
+                                  class="resizer"
+                                  role="presentation"
+                                  onmousedown={(e) => startResize(e, activeTab, col.name)}
+                                ></span>
+                              </th>
+                            {/each}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {#each res.rows as row}
+                            <tr>
+                              {#each row as cell}
+                                <td class:null={isNull(cell)}>{cellText(cell)}</td>
+                              {/each}
+                            </tr>
                           {/each}
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div class="count">
+                      第 {ri + 1} 条 · 共 {res.rows.length} 行
+                      {#if ri === activeTab.results.length - 1 && activeTab.elapsed !== null}
+                        · 耗时 {activeTab.elapsed.toFixed(0)} ms
+                      {/if}
+                    </div>
+                  {/if}
                 </div>
-                <div class="count">
-                  共 {activeTab.rows.length} 行
-                  {#if activeTab.elapsed !== null} · 耗时 {activeTab.elapsed.toFixed(0)} ms{/if}
-                </div>
-              {:else if !activeTab.error && activeTab.affected === null && !activeTab.running}
-                <div class="empty">连接后输入 SQL，点执行查看结果；双击左侧表直接浏览数据</div>
+              {/each}
+              {#if activeTab.results.length === 0 && !activeTab.running}
+                <div class="empty">连接后输入 SQL，点执行查看结果（支持多语句）；双击左侧表直接浏览数据</div>
               {/if}
             </div>
           </div>
@@ -1182,10 +1227,16 @@
     background: #1b1e25;
     border: 1px solid #2c303a;
     border-radius: 8px;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
+    overflow-y: auto;
     min-height: 0;
+  }
+
+  .result-block {
+    border-bottom: 1px solid #23262e;
+  }
+
+  .result-block:last-child {
+    border-bottom: none;
   }
 
   .error {
@@ -1206,7 +1257,6 @@
   }
 
   .table-wrap {
-    flex: 1;
     overflow: auto;
   }
 

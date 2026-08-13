@@ -25,7 +25,7 @@ struct ColumnInfo {
     type_name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct QueryResult {
     columns: Vec<ColumnInfo>,
     rows: Vec<Vec<serde_json::Value>>,
@@ -172,18 +172,156 @@ async fn disconnect(state: State<'_, AppState>, conn_id: String) -> Result<(), S
     Ok(())
 }
 
-/// 执行 SQL（Tauri command 入口）
+/// 拆分 SQL 为多条语句。
+/// 支持：单引号/双引号字符串（含 '' 转义）、$tag$ 美元引用、-- 行注释、/* */ 块注释
+/// 顶层分号处拆分，空语句忽略。拆出的语句保留原始内容（含注释），trim 后返回。
+fn split_statements(sql: &str) -> Vec<String> {
+    let b: Vec<char> = sql.chars().collect();
+    let n = b.len();
+    let mut stmts: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut i = 0;
+
+    while i < n {
+        let c = b[i];
+
+        // 行注释：-- 到行尾（含分号）
+        if c == '-' && i + 1 < n && b[i + 1] == '-' {
+            cur.push(c);
+            cur.push('-');
+            i += 2;
+            while i < n && b[i] != '\n' {
+                cur.push(b[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // 块注释：/* ... */
+        if c == '/' && i + 1 < n && b[i + 1] == '*' {
+            cur.push(c);
+            cur.push('*');
+            i += 2;
+            while i + 1 < n && !(b[i] == '*' && b[i + 1] == '/') {
+                cur.push(b[i]);
+                i += 1;
+            }
+            if i + 1 < n {
+                cur.push('*');
+                cur.push('/');
+                i += 2;
+            }
+            continue;
+        }
+
+        // 字符串引用（含 '' 转义）
+        if c == '\'' || c == '"' {
+            let q = c;
+            cur.push(q);
+            i += 1;
+            while i < n {
+                if b[i] == q {
+                    if i + 1 < n && b[i + 1] == q {
+                        cur.push(q);
+                        cur.push(q);
+                        i += 2;
+                        continue;
+                    }
+                    cur.push(q);
+                    i += 1;
+                    break;
+                }
+                cur.push(b[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // 美元引用：$tag$ ... $tag$
+        if c == '$' {
+            let mut j = i + 1;
+            while j < n && (b[j].is_alphanumeric() || b[j] == '_') {
+                j += 1;
+            }
+            if j < n && b[j] == '$' {
+                let close: String = b[i..=j].iter().collect(); // $tag$
+                // 从开始标记之后查找结束标记（k 从 i + close.len() 起步）
+                let mut k = i + close.len();
+                let mut found = false;
+                while k + close.len() <= n {
+                    let seg: String = b[k..k + close.len()].iter().collect();
+                    if seg == close {
+                        cur.push_str(&b[i..k + close.len()].iter().collect::<String>());
+                        i = k + close.len();
+                        found = true;
+                        break;
+                    }
+                    k += 1;
+                }
+                if !found {
+                    // 未闭合的美元引用：原样推入剩余部分，交给 PostgreSQL 报错
+                    cur.push_str(&b[i..].iter().collect::<String>());
+                    i = n;
+                }
+                continue;
+            }
+            cur.push(c);
+            i += 1;
+            continue;
+        }
+
+        // 语句分隔
+        if c == ';' {
+            let t = cur.trim();
+            if !t.is_empty() {
+                stmts.push(t.to_string());
+            }
+            cur.clear();
+            i += 1;
+            continue;
+        }
+
+        cur.push(c);
+        i += 1;
+    }
+
+    let t = cur.trim();
+    if !t.is_empty() {
+        stmts.push(t.to_string());
+    }
+    stmts
+}
+
+#[derive(Serialize, Debug)]
+struct MultiResult {
+    results: Vec<QueryResult>,
+}
+
+/// 核心：逐条执行多条 SQL（拆分后循环调用 run_query）
+async fn run_query_multi(client: &Client, sql: &str) -> Result<MultiResult, String> {
+    let stmts = split_statements(sql);
+    if stmts.is_empty() {
+        return Err("没有可执行的 SQL 语句".into());
+    }
+    let mut results = Vec::with_capacity(stmts.len());
+    for s in &stmts {
+        results.push(run_query(client, s).await?);
+    }
+    Ok(MultiResult { results })
+}
+
+/// 执行 SQL（Tauri command 入口，支持多语句）
 #[tauri::command]
 async fn query(
     state: State<'_, AppState>,
     conn_id: String,
     sql: String,
-) -> Result<QueryResult, String> {
+) -> Result<MultiResult, String> {
     let entry = {
         let conns = state.conns.lock().await;
         conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
-    run_query(&entry.client, &sql).await
+    run_query_multi(&entry.client, &sql).await
 }
 
 /// 列出连接对应集群的数据库（Tauri command 入口）
@@ -682,6 +820,78 @@ mod tests {
             "两页 id 不应重叠: {id1:?} vs {id2:?}"
         );
         assert_eq!(page1.columns[0].name, "id", "首列应为 id");
+    }
+
+    #[test]
+    fn test_split_statements() {
+        // 基本多语句
+        assert_eq!(
+            split_statements("SELECT 1; SELECT 2;"),
+            vec!["SELECT 1", "SELECT 2"]
+        );
+        // 字符串字面量内的分号不拆分
+        assert_eq!(
+            split_statements("SELECT 'a;b';"),
+            vec!["SELECT 'a;b'"]
+        );
+        // 双引号标识符内的分号
+        assert_eq!(
+            split_statements("SELECT \"a;b\" FROM t;"),
+            vec!["SELECT \"a;b\" FROM t"]
+        );
+        // 美元引用内的分号
+        assert_eq!(
+            split_statements("SELECT $$a;b$$;"),
+            vec!["SELECT $$a;b$$"]
+        );
+        assert_eq!(
+            split_statements("SELECT $tag$a;b$tag$;"),
+            vec!["SELECT $tag$a;b$tag$"]
+        );
+        // 行注释内的分号
+        assert_eq!(
+            split_statements("-- c;\nSELECT 1;"),
+            vec!["-- c;\nSELECT 1"]
+        );
+        // 块注释内的分号
+        assert_eq!(
+            split_statements("/* a; b */ SELECT 1;"),
+            vec!["/* a; b */ SELECT 1"]
+        );
+        // 空语句忽略
+        assert_eq!(split_statements(";; SELECT 1 ;;"), vec!["SELECT 1"]);
+        // 单引号转义 '' 内的分号
+        assert_eq!(
+            split_statements("SELECT 'it''s; ok';"),
+            vec!["SELECT 'it''s; ok'"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_statement() {
+        let (client, _) = open_connection(&test_cfg()).await.expect("连接失败");
+
+        // 查询 + 字符串内分号
+        let multi = run_query_multi(&client, "SELECT 1 AS a; SELECT 'x;y' AS b;")
+            .await
+            .expect("多语句失败");
+        assert_eq!(multi.results.len(), 2);
+        assert_eq!(multi.results[0].columns[0].name, "a");
+        assert_eq!(
+            multi.results[1].rows[0][0],
+            serde_json::Value::String("x;y".into())
+        );
+
+        // DML + 查询混合
+        let multi2 = run_query_multi(
+            &client,
+            "UPDATE products SET stock = stock WHERE id = 1; SELECT count(*) FROM products;",
+        )
+        .await
+        .expect("混合多语句失败");
+        assert_eq!(multi2.results.len(), 2);
+        assert_eq!(multi2.results[0].rows_affected, Some(1));
+        assert!(multi2.results[1].rows[0][0].is_number());
     }
 }
 
