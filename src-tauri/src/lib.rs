@@ -487,7 +487,8 @@ async fn paginate_table_core(
     let qtable = format!("\"{}\"", table.replace('"', "\"\""));
 
     // 按主键排序（无主键表按物理位置 ctid，保证分页稳定）
-    let tbl_lit = table.replace('\'', "''"); // ::regclass 需要单引号字符串
+    // '"表名"'::regclass：单引号内嵌双引号保留大小写（'Test'::regclass 会被折叠成小写）
+    let tbl_lit = format!("\"{}\"", table.replace('"', "\"\""));
     let pk_sql = format!(
         "SELECT a.attname FROM pg_constraint c \
          JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
@@ -1165,7 +1166,12 @@ async fn drop_table(
         let conns = state.conns.lock().await;
         conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
     };
-    drop_table_core(&cfg, &dbname, &table).await
+    let res = drop_table_core(&cfg, &dbname, &table).await;
+    match &res {
+        Ok(()) => eprintln!("[tusk] drop_table {dbname}.{table} 成功"),
+        Err(e) => eprintln!("[tusk] drop_table ERROR {dbname}.{table}: {e}"),
+    }
+    res
 }
 
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
@@ -1948,6 +1954,48 @@ mod tests {
             .expect("q")
             .get(0);
         assert!(!exists, "清理后表不应存在");
+    }
+
+    #[tokio::test]
+    async fn test_pagination_uppercase_table() {
+        // 大小写敏感表名（PG 折叠规则：'Test'::regclass 会被折叠成小写）
+        let cfg = test_cfg();
+        let tname = "TestOrder";
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("建大写表失败");
+
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        client
+            .execute(&format!("INSERT INTO \"{tname}\" (name) VALUES ('x')"), &[])
+            .await
+            .expect("插入失败");
+
+        // 分页读取（之前主键查询用单引号 regclass，大写表名会失败）
+        let page = paginate_table_core(&cfg, "tusk_demo", tname, 10, 0)
+            .await
+            .expect("大写表分页失败");
+        assert_eq!(page.rows.len(), 1);
+
+        // 删除大写表
+        drop_table_core(&cfg, "tusk_demo", tname).await.expect("删大写表失败");
+        let exists: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+                &[&tname],
+            )
+            .await
+            .expect("q")
+            .get(0);
+        assert!(!exists, "大写表应已删除");
     }
 }
 

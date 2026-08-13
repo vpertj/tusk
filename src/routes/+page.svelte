@@ -212,6 +212,20 @@
     }
   }
 
+  // 删除表（对象树入口）
+  async function dropTableFromTree(db: string, table: string) {
+    if (!confirm(`确定删除表「${table}」？表中数据将全部丢失，此操作不可撤销！`)) return;
+    try {
+      await invoke('drop_table', { connId, dbname: db, table });
+      // 关闭已打开的该表页签
+      const openTab = tabs.find((t) => t.kind === 'table' && t.dbname === db && t.table === table);
+      if (openTab) closeTab(openTab.id);
+      await refreshTables(db);
+    } catch (e) {
+      status = `删除表失败: ${e}`;
+    }
+  }
+
   // 删除表（表页签工具栏）
   async function dropTable(raw: QueryTab) {
     const t = resolveTab(raw);
@@ -956,6 +970,15 @@
                         <span class="ico">📋</span>
                         <span class="label">{tb.name}</span>
                         {#if loadingKey === `${db.name}.${tb.name}`}<span class="spin">…</span>{/if}
+                        <button
+                          class="tree-del"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            dropTableFromTree(db.name, tb.name);
+                          }}
+                          title="删除表（不可恢复）"
+                          >🗑</button
+                        >
                       </div>
                       {#if treeOpen[`${db.name}.${tb.name}`] && columns[`${db.name}.${tb.name}`]}
                         <div class="tree-children">
@@ -1337,7 +1360,19 @@
                   />
                 </span>
                 <span class="dg-serial">
-                  <input type="checkbox" bind:checked={c.isSerial} />
+                  <input
+                    type="checkbox"
+                    checked={c.baseType === 'serial' || c.baseType === 'bigserial'}
+                    onclick={(e) => {
+                      const want = (e.target as HTMLInputElement).checked;
+                      if (want && c.baseType !== 'serial' && c.baseType !== 'bigserial') {
+                        c.baseType = 'serial';
+                      }
+                      if (!want && (c.baseType === 'serial' || c.baseType === 'bigserial')) {
+                        c.baseType = 'int4';
+                      }
+                    }}
+                  />
                 </span>
                 <span class="dg-name">
                   <input bind:value={c.name} placeholder="字段名" />
@@ -1356,7 +1391,11 @@
                   />
                 </span>
                 <span class="dg-null">
-                  <input type="checkbox" bind:checked={c.nullable} />
+                  <input
+                    type="checkbox"
+                    bind:checked={c.nullable}
+                    disabled={c.baseType === 'serial' || c.baseType === 'bigserial'}
+                  />
                 </span>
                 <span class="dg-def">
                   <input bind:value={c.default} placeholder="now() / 0 / 'x'" />
@@ -2116,6 +2155,27 @@
 
   tbody tr.selected:hover {
     background: #2a3b58;
+  }
+
+  .tree-row .tree-del {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    color: #5c6472;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 0 4px;
+    opacity: 0;
+    transition: opacity 0.12s;
+    line-height: 1;
+  }
+
+  .tree-row:hover .tree-del {
+    opacity: 1;
+  }
+
+  .tree-row .tree-del:hover {
+    color: #e05656;
   }
 
   /* 表页签子标签栏 */
