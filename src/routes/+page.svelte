@@ -573,6 +573,29 @@
     return tabs.find((t) => t.id === activeTabId) ?? tabs[0];
   }
 
+  // 打开 SQL 文件加载到编辑器
+  async function onSqlFilePicked(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      let t: QueryTab;
+      if (activeTab && activeTab.kind === 'query') {
+        t = resolveTab(activeTab);
+      } else {
+        openNewTab();
+        t = activeTab;
+      }
+      t.sql = text;
+      t.title = `📄 ${file.name}`;
+      t.error = '';
+    } catch (err) {
+      status = `读取文件失败: ${err}`;
+    }
+    input.value = '';
+  }
+
   function openNewTab() {
     const t = newTab('');
     tabs.push(t);
@@ -1082,6 +1105,19 @@
     <div class="logo">🐘 Tusk</div>
     <div class="toolbar">
       <button onclick={openNewTab} disabled={!connId} title="新建查询 (Cmd+N)">＋ 新建查询</button>
+      <input
+        type="file"
+        accept=".sql,.txt,text/plain"
+        id="sql-file-input"
+        hidden
+        onchange={onSqlFilePicked}
+      />
+      <button
+        onclick={() => document.getElementById('sql-file-input')?.click()}
+        disabled={!connId}
+        title="打开 .sql 文件加载到编辑器"
+        >📂 打开 SQL 文件</button
+      >
       <button onclick={openDesigner} disabled={!connId} title="新建表（表设计器）">＋ 新建表</button>
       <button onclick={loadDbs} disabled={!connId} title="刷新对象树">⟳ 刷新</button>
       {#if connId}
