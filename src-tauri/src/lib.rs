@@ -485,7 +485,29 @@ async fn paginate_table_core(
     c.dbname = dbname.to_string();
     let (client, _) = open_connection(&c).await?;
     let qtable = format!("\"{}\"", table.replace('"', "\"\""));
-    let sql = format!("SELECT * FROM {qtable} LIMIT $1 OFFSET $2");
+
+    // 按主键排序（无主键表按物理位置 ctid，保证分页稳定）
+    let tbl_lit = table.replace('\'', "''"); // ::regclass 需要单引号字符串
+    let pk_sql = format!(
+        "SELECT a.attname FROM pg_constraint c \
+         JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
+         WHERE c.conrelid = '{tbl_lit}'::regclass AND c.contype = 'p' \
+         ORDER BY k.ord"
+    );
+    let pk_rows = client
+        .query(&pk_sql, &[])
+        .await
+        .map_err(|e| format!("主键查询失败: {e}"))?;
+    let pk_cols: Vec<String> = pk_rows.iter().map(|r| r.get::<_, String>(0)).collect();
+    let order_by = if pk_cols.is_empty() {
+        " ORDER BY ctid".to_string()
+    } else {
+        let cols: Vec<String> = pk_cols.iter().map(|c| format!("\"{}\"", c.replace('"', "\"\""))).collect();
+        format!(" ORDER BY {}", cols.join(", "))
+    };
+
+    let sql = format!("SELECT * FROM {qtable}{order_by} LIMIT $1 OFFSET $2");
     let stmt = client
         .prepare(&sql)
         .await
@@ -1272,6 +1294,32 @@ mod tests {
             "两页 id 不应重叠: {id1:?} vs {id2:?}"
         );
         assert_eq!(page1.columns[0].name, "id", "首列应为 id");
+
+        // 每页按主键 id 升序
+        let ids: Vec<i64> = page1.rows.iter().map(|r| r[0].as_i64().unwrap()).collect();
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "第一页应按主键升序，实际: {ids:?}"
+        );
+
+        // 模拟用户改值后刷新：更新过的行不应破坏分页顺序
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        client
+            .execute("UPDATE products SET name = name WHERE id = 1", &[])
+            .await
+            .expect("更新失败");
+        let page_after = paginate_table_core(&cfg, "tusk_demo", "products", 2, 0)
+            .await
+            .expect("更新后第一页失败");
+        let ids_after: Vec<i64> = page_after
+            .rows
+            .iter()
+            .map(|r| r[0].as_i64().unwrap())
+            .collect();
+        assert!(
+            ids_after.windows(2).all(|w| w[0] < w[1]),
+            "更新后仍应按主键升序，实际: {ids_after:?}"
+        );
     }
 
     #[test]
