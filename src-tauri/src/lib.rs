@@ -372,6 +372,7 @@ struct DatabaseInfo {
 #[derive(Serialize, Debug)]
 struct TableInfo {
     name: String,
+    kind: String, // "table" | "view"
 }
 
 #[derive(Serialize, Debug)]
@@ -406,15 +407,90 @@ async fn list_tables_core(cfg: &ConnConfig, dbname: &str) -> Result<Vec<TableInf
     let (client, _) = open_connection(&c).await?;
     let rows = client
         .query(
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+            "SELECT c.relname,
+               CASE WHEN c.relkind = 'v' THEN 'view' ELSE 'table' END
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v')
+             ORDER BY c.relname",
             &[],
         )
         .await
         .map_err(|e| format!("查询表列表失败: {e}"))?;
     Ok(rows
         .iter()
-        .map(|r| TableInfo { name: r.get(0) })
+        .map(|r| TableInfo {
+            name: r.get(0),
+            kind: r.get(1),
+        })
         .collect())
+}
+
+/// 核心：创建视图（只允许 SELECT，防注入）
+async fn create_view_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    view_name: &str,
+    select_sql: &str,
+) -> Result<(), String> {
+    if view_name.trim().is_empty() {
+        return Err("视图名不能为空".into());
+    }
+    let head = strip_leading_comments(select_sql).to_ascii_uppercase();
+    if !head.starts_with("SELECT") {
+        return Err("视图必须是 SELECT 语句".into());
+    }
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    let sql = format!("CREATE VIEW {} AS {}", quote_ident(view_name), select_sql);
+    client
+        .execute(&sql, &[])
+        .await
+        .map_err(|e| format!("创建视图失败: {e}"))?;
+    Ok(())
+}
+
+/// 核心：删除视图
+async fn drop_view_core(cfg: &ConnConfig, dbname: &str, view_name: &str) -> Result<(), String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    let sql = format!("DROP VIEW {}", quote_ident(view_name));
+    client
+        .execute(&sql, &[])
+        .await
+        .map_err(|e| format!("删除视图失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_view(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    view_name: String,
+    select_sql: String,
+) -> Result<(), String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    create_view_core(&cfg, &dbname, &view_name, &select_sql).await
+}
+
+#[tauri::command]
+async fn drop_view(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    view_name: String,
+) -> Result<(), String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    drop_view_core(&cfg, &dbname, &view_name).await
 }
 
 /// 核心：列出表的字段信息（类型/可空/默认值/主键标记）
@@ -513,11 +589,22 @@ async fn paginate_table_core(
         .await
         .map_err(|e| format!("主键查询失败: {e}"))?;
     let pk_cols: Vec<String> = pk_rows.iter().map(|r| r.get::<_, String>(0)).collect();
-    let order_by = if pk_cols.is_empty() {
-        " ORDER BY ctid".to_string()
-    } else {
+    // 视图没有 ctid 物理列，无主键时不能 ORDER BY ctid
+    let relkind: String = client
+        .query_one(
+            &format!("SELECT relkind::text FROM pg_class WHERE oid = '{tbl_lit}'::regclass"),
+            &[],
+        )
+        .await
+        .map_err(|e| format!("查询对象类型失败: {e}"))?
+        .get(0);
+    let order_by = if !pk_cols.is_empty() {
         let cols: Vec<String> = pk_cols.iter().map(|c| format!("\"{}\"", c.replace('"', "\"\""))).collect();
         format!(" ORDER BY {}", cols.join(", "))
+    } else if relkind == "v" {
+        String::new() // 视图：不排序
+    } else {
+        " ORDER BY ctid".to_string()
     };
 
     // 筛选条件（列名 quote_ident 防注入、运算符白名单、值参数化 + 类型强转）
@@ -2938,6 +3025,58 @@ mod tests {
         assert!(content.contains("你好"), "内容应正确: {content}");
         std::fs::remove_file(&p).ok();
     }
+
+    #[tokio::test]
+    async fn test_views() {
+        let cfg = test_cfg();
+        let tname = format!("tusk_view_src_{}", std::process::id());
+        let vname = format!("tusk_view_{}", std::process::id());
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("建表失败");
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        client
+            .execute(&format!("INSERT INTO \"{tname}\" (name) VALUES ('A'),('B')"), &[])
+            .await
+            .expect("插入失败");
+
+        create_view_core(
+            &cfg,
+            "tusk_demo",
+            &vname,
+            &format!("SELECT id, name FROM \"{tname}\" WHERE name = 'A'"),
+        )
+        .await
+        .expect("创建视图失败");
+
+        let tables = list_tables_core(&cfg, "tusk_demo").await.expect("列表失败");
+        let v = tables.iter().find(|t| t.name == vname).expect("视图应在列表");
+        assert_eq!(v.kind, "view", "kind 应为 view: {}", v.kind);
+
+        let page = paginate_table_core(&cfg, "tusk_demo", &vname, 50, 0, vec![])
+            .await
+            .expect("视图分页失败");
+        assert_eq!(page.total, Some(1), "视图应返回 1 行");
+
+        let err = create_view_core(&cfg, "tusk_demo", "tusk_bad_view", "DELETE FROM x")
+            .await
+            .expect_err("非 SELECT 应拒绝");
+        assert!(err.contains("SELECT"), "{err}");
+
+        drop_view_core(&cfg, "tusk_demo", &vname).await.expect("删除视图失败");
+        let tables2 = list_tables_core(&cfg, "tusk_demo").await.expect("列表2失败");
+        assert!(!tables2.iter().any(|t| t.name == vname), "删除后视图应消失");
+
+        drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2970,7 +3109,9 @@ pub fn run() {
             duplicate_table,
             insert_row_vals,
             export_sql,
-            write_text_file
+            write_text_file,
+            create_view,
+            drop_view
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
