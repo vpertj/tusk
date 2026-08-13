@@ -92,6 +92,7 @@
 
   interface TableInfo {
     name: string;
+    kind: string; // "table" | "view"
   }
   interface SchemaColumn {
     name: string;
@@ -434,10 +435,12 @@
   }
 
   // 删除表确认弹窗（WKWebView 不支持 window.confirm，必须自定义）
-  let confirmDrop = $state<{ db: string; table: string } | null>(null);
+  let confirmDrop = $state<{ db: string; table: string; kind?: string } | null>(null);
 
   // ===== 表右键菜单 + 复制表 =====
-  let tableMenu = $state<{ x: number; y: number; db: string; table: string } | null>(null);
+  let tableMenu = $state<{ x: number; y: number; db: string; table: string; kind: string } | null>(
+    null,
+  );
   let dupDialog = $state<{
     db: string;
     table: string;
@@ -446,9 +449,9 @@
     err: string;
   } | null>(null);
 
-  function openTableMenu(e: MouseEvent, db: string, table: string) {
+  function openTableMenu(e: MouseEvent, db: string, table: string, kind = 'table') {
     e.preventDefault();
-    tableMenu = { x: e.clientX, y: e.clientY, db, table };
+    tableMenu = { x: e.clientX, y: e.clientY, db, table, kind };
   }
 
   async function doDuplicate() {
@@ -474,6 +477,42 @@
     }
   }
 
+  // 删除视图（对象树入口）
+  function dropViewFromTree(db: string, view: string) {
+    confirmDrop = { db, table: view, kind: 'view' };
+  }
+
+  // ===== 新建视图 =====
+  let showViewDialog = $state(false);
+  let viewDialog = $state<{ db: string; name: string; sql: string; err: string } | null>(null);
+
+  function openViewDialog() {
+    viewDialog = { db: dbs[0]?.name ?? dbname, name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
+    showViewDialog = true;
+  }
+
+  async function doCreateView() {
+    const d = viewDialog;
+    if (!d) return;
+    if (!d.name.trim()) {
+      d.err = '视图名不能为空';
+      return;
+    }
+    try {
+      await invoke('create_view', {
+        connId,
+        dbname: d.db,
+        viewName: d.name.trim(),
+        selectSql: d.sql,
+      });
+      showViewDialog = false;
+      await refreshTables(d.db);
+      openTableTab(d.db, d.name.trim());
+    } catch (e) {
+      d.err = String(e);
+    }
+  }
+
   // 删除表（对象树入口）
   function dropTableFromTree(db: string, table: string) {
     confirmDrop = { db, table };
@@ -490,12 +529,16 @@
     if (!cd) return;
     confirmDrop = null;
     try {
-      await invoke('drop_table', { connId, dbname: cd.db, table: cd.table });
+      if (cd.kind === 'view') {
+        await invoke('drop_view', { connId, dbname: cd.db, viewName: cd.table });
+      } else {
+        await invoke('drop_table', { connId, dbname: cd.db, table: cd.table });
+      }
       const openTab = tabs.find((t) => t.kind === 'table' && t.dbname === cd.db && t.table === cd.table);
       if (openTab) closeTab(openTab.id);
       await refreshTables(cd.db);
     } catch (e) {
-      status = `删除表失败: ${e}`;
+      status = `删除失败: ${e}`;
     }
   }
   let treeOpen = $state<Record<string, boolean>>({}); // key: db / db.table
@@ -1119,6 +1162,7 @@
         >📂 打开 SQL 文件</button
       >
       <button onclick={openDesigner} disabled={!connId} title="新建表（表设计器）">＋ 新建表</button>
+      <button onclick={openViewDialog} disabled={!connId} title="新建视图">＋ 新建视图</button>
       <button onclick={loadDbs} disabled={!connId} title="刷新对象树">⟳ 刷新</button>
       {#if connId}
         <button onclick={doDisconnect} class="danger">断开</button>
@@ -1258,7 +1302,7 @@
                         tabindex="0"
                         onclick={() => openTableTab(db.name, tb.name)}
                         onkeydown={(e) => e.key === 'Enter' && openTableTab(db.name, tb.name)}
-                        oncontextmenu={(e) => openTableMenu(e, db.name, tb.name)}
+                        oncontextmenu={(e) => openTableMenu(e, db.name, tb.name, tb.kind)}
                         title="单击打开表 · 右键更多操作"
                       >
                         <span
@@ -1275,25 +1319,31 @@
                           }}
                           >{treeOpen[`${db.name}.${tb.name}`] ? '▾' : '▸'}</span
                         >
-                        <span class="ico">📋</span>
+                        <span class="ico">{tb.kind === 'view' ? '👁' : '📋'}</span>
                         <span class="label">{tb.name}</span>
                         {#if loadingKey === `${db.name}.${tb.name}`}<span class="spin">…</span>{/if}
+                        {#if tb.kind === 'table'}
+                          <button
+                            class="tree-del"
+                            onclick={(e) => {
+                              e.stopPropagation();
+                              openDesignerForEdit(db.name, tb.name);
+                            }}
+                            title="编辑表结构"
+                            >✎</button
+                          >
+                        {/if}
                         <button
                           class="tree-del"
                           onclick={(e) => {
                             e.stopPropagation();
-                            openDesignerForEdit(db.name, tb.name);
+                            if (tb.kind === 'view') {
+                              dropViewFromTree(db.name, tb.name);
+                            } else {
+                              dropTableFromTree(db.name, tb.name);
+                            }
                           }}
-                          title="编辑表结构"
-                          >✎</button
-                        >
-                        <button
-                          class="tree-del"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            dropTableFromTree(db.name, tb.name);
-                          }}
-                          title="删除表（不可恢复）"
+                          title="删除（不可恢复）"
                           >🗑</button
                         >
                       </div>
@@ -1848,6 +1898,56 @@
     </div>
   {/if}
 
+  <!-- ============ 新建视图弹窗 ============ -->
+  {#if showViewDialog && viewDialog}
+    <div class="overlay" role="presentation" onclick={() => (showViewDialog = false)}>
+      <div
+        class="conn-dialog view-dialog"
+        role="dialog"
+        aria-label="新建视图"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (showViewDialog = false)}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">👁 新建视图</span>
+          <button class="dialog-close" onclick={() => (showViewDialog = false)}>×</button>
+        </div>
+        <div class="dialog-body">
+          {#if viewDialog.err}
+            <div class="error">⚠ {viewDialog.err}</div>
+          {/if}
+          <div class="field">
+            <label for="v-name">视图名</label>
+            <input id="v-name" bind:value={viewDialog.name} placeholder="视图名" />
+          </div>
+          <div class="field">
+            <label for="v-db">数据库</label>
+            <select id="v-db" bind:value={viewDialog.db}>
+              {#each dbs as db}
+                <option value={db.name}>{db.name}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="field">
+            <label for="v-sql">SELECT 语句</label>
+            <textarea
+              id="v-sql"
+              bind:value={viewDialog.sql}
+              rows="8"
+              spellcheck="false"
+              placeholder="SELECT ...（只允许 SELECT）"
+            ></textarea>
+          </div>
+          <div class="field-actions" style="margin-top:16px">
+            <button onclick={() => (showViewDialog = false)}>取消</button>
+            <button onclick={doCreateView} class="primary">创建视图</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- ============ 表右键菜单 ============ -->
   {#if tableMenu}
     <div
@@ -1865,50 +1965,56 @@
           openTableTab(tableMenu!.db, tableMenu!.table);
           tableMenu = null;
         }}
-        >📖 打开表</button
+        >📖 打开</button
       >
-      <button
-        onclick={() => {
-          openDesignerForEdit(tableMenu!.db, tableMenu!.table);
-          tableMenu = null;
-        }}
-        >✎ 编辑表结构</button
-      >
-      <div class="ctx-sep"></div>
-      <button
-        onclick={() => {
-          dupDialog = {
-            db: tableMenu!.db,
-            table: tableMenu!.table,
-            withData: false,
-            name: `${tableMenu!.table}_copy`,
-            err: '',
-          };
-          tableMenu = null;
-        }}
-        >⧉ 复制表结构</button
-      >
-      <button
-        onclick={() => {
-          dupDialog = {
-            db: tableMenu!.db,
-            table: tableMenu!.table,
-            withData: true,
-            name: `${tableMenu!.table}_copy`,
-            err: '',
-          };
-          tableMenu = null;
-        }}
-        >⧉ 复制表（含数据）</button
-      >
+      {#if tableMenu!.kind === 'table'}
+        <button
+          onclick={() => {
+            openDesignerForEdit(tableMenu!.db, tableMenu!.table);
+            tableMenu = null;
+          }}
+          >✎ 编辑表结构</button
+        >
+        <div class="ctx-sep"></div>
+        <button
+          onclick={() => {
+            dupDialog = {
+              db: tableMenu!.db,
+              table: tableMenu!.table,
+              withData: false,
+              name: `${tableMenu!.table}_copy`,
+              err: '',
+            };
+            tableMenu = null;
+          }}
+          >⧉ 复制表结构</button
+        >
+        <button
+          onclick={() => {
+            dupDialog = {
+              db: tableMenu!.db,
+              table: tableMenu!.table,
+              withData: true,
+              name: `${tableMenu!.table}_copy`,
+              err: '',
+            };
+            tableMenu = null;
+          }}
+          >⧉ 复制表（含数据）</button
+        >
+      {/if}
       <div class="ctx-sep"></div>
       <button
         class="ctx-danger"
         onclick={() => {
-          dropTableFromTree(tableMenu!.db, tableMenu!.table);
+          if (tableMenu!.kind === 'view') {
+            dropViewFromTree(tableMenu!.db, tableMenu!.table);
+          } else {
+            dropTableFromTree(tableMenu!.db, tableMenu!.table);
+          }
           tableMenu = null;
         }}
-        >🗑 删除表</button
+        >🗑 删除</button
       >
     </div>
   {/if}
@@ -1964,8 +2070,12 @@
         </div>
         <div class="dialog-body">
           <p class="confirm-text">
-            确定删除表「<b>{confirmDrop.table}</b>」？<br />
-            <span class="confirm-warn">表中数据将全部丢失，此操作不可撤销！</span>
+            {#if confirmDrop.kind === 'view'}
+              确定删除视图「<b>{confirmDrop.table}</b>」？
+            {:else}
+              确定删除表「<b>{confirmDrop.table}</b>」？<br />
+              <span class="confirm-warn">表中数据将全部丢失，此操作不可撤销！</span>
+            {/if}
           </p>
           <div class="field-actions" style="margin-top:18px">
             <button onclick={() => (confirmDrop = null)}>取消</button>
@@ -2560,6 +2670,28 @@
     font-size: 11px;
     font-weight: 400;
     margin-left: 6px;
+  }
+
+  /* 新建视图弹窗 */
+  .view-dialog {
+    width: 560px;
+  }
+
+  .view-dialog textarea {
+    width: 100%;
+    background: #1c2029;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #d7dae0;
+    font-size: 12px;
+    font-family: 'SF Mono', Menlo, monospace;
+    padding: 8px 10px;
+    resize: vertical;
+  }
+
+  .view-dialog textarea:focus {
+    outline: none;
+    border-color: #4fc3f7;
   }
 
   /* 右键菜单 */
