@@ -68,7 +68,9 @@
   // ================= 标签页工作区 =================
   interface QueryTab {
     id: number;
+    kind: 'query' | 'table';
     title: string;
+    // 查询标签字段
     sql: string;
     columns: { name: string; type_name: string }[];
     rows: unknown[][];
@@ -77,6 +79,15 @@
     running: boolean;
     elapsed: number | null;
     colWidths: Record<string, string>;
+    // 表标签字段
+    dbname?: string;
+    table?: string;
+    subTab?: 'data' | 'structure' | 'sql';
+    page?: number;
+    pageSize?: number;
+    total?: number;
+    loading?: boolean;
+    structure?: SchemaColumn[];
   }
   let tabs = $state<QueryTab[]>([]);
   let activeTabId = $state(0);
@@ -85,6 +96,7 @@
   function newTab(sql = ''): QueryTab {
     return {
       id: tabSeq++,
+      kind: 'query',
       title: `查询 ${tabSeq - 1}`,
       sql,
       columns: [],
@@ -207,15 +219,110 @@
     }
   }
 
-  // 双击表：在查询标签里打开 SELECT
-  function openTableSql(db: string, table: string) {
-    const t = ensureTab();
-    t.title = table;
-    t.sql = `SELECT * FROM "${db}"."${table}"\nLIMIT 100;`;
-    t.columns = [];
-    t.rows = [];
+  // 双击表：打开表专属页签（数据/结构/SQL预览）
+  function openTableTab(db: string, table: string) {
+    const exist = tabs.find((t) => t.kind === 'table' && t.dbname === db && t.table === table);
+    if (exist) {
+      activeTabId = exist.id;
+      return;
+    }
+    const t: QueryTab = {
+      id: tabSeq++,
+      kind: 'table',
+      title: table,
+      sql: '',
+      columns: [],
+      rows: [],
+      affected: null,
+      error: '',
+      running: false,
+      elapsed: null,
+      colWidths: {},
+      dbname: db,
+      table,
+      subTab: 'data',
+      page: 1,
+      pageSize: 50,
+      total: 0,
+      loading: false,
+      structure: undefined,
+    };
+    tabs.push(t);
+    activeTabId = t.id;
+    loadTablePage(t);
+  }
+
+  // 加载表数据页
+  async function loadTablePage(t: QueryTab) {
+    if (!connId || !t.dbname || !t.table) return;
+    t.loading = true;
     t.error = '';
-    runQuery(t);
+    try {
+      const res = await invoke<{
+        columns: { name: string; type_name: string }[];
+        rows: unknown[][];
+        total: number | null;
+      }>('paginate_table', {
+        connId,
+        dbname: t.dbname,
+        table: t.table,
+        limit: t.pageSize,
+        offset: (t.page! - 1) * t.pageSize!,
+      });
+      t.columns = res.columns;
+      t.rows = res.rows;
+      t.total = res.total ?? 0;
+      t.colWidths = {};
+    } catch (e) {
+      t.error = String(e);
+      t.rows = [];
+      t.columns = [];
+    }
+    t.loading = false;
+  }
+
+  // 加载表结构
+  async function loadStructure(t: QueryTab) {
+    if (!connId || !t.dbname || !t.table) return;
+    if (t.structure) return;
+    try {
+      t.structure = await invoke<SchemaColumn[]>('list_columns', {
+        connId,
+        dbname: t.dbname,
+        table: t.table,
+      });
+    } catch (e) {
+      t.error = String(e);
+    }
+  }
+
+  // 切换表页签子标签
+  function setSubTab(t: QueryTab, sub: 'data' | 'structure' | 'sql') {
+    t.subTab = sub;
+    if (sub === 'structure') loadStructure(t);
+    if (sub === 'data' && t.rows.length === 0 && !t.loading) loadTablePage(t);
+  }
+
+  function tablePrev(t: QueryTab) {
+    if (t.page! > 1) {
+      t.page!--;
+      loadTablePage(t);
+    }
+  }
+
+  function tableNext(t: QueryTab) {
+    if (t.total! > t.page! * t.pageSize!) {
+      t.page!++;
+      loadTablePage(t);
+    }
+  }
+
+  // 表 SQL 预览 → 在查询编辑器打开
+  function openTableInEditor(t: QueryTab) {
+    const sql = `SELECT * FROM "${t.dbname}"."${t.table}";`;
+    const q = newTab(sql);
+    tabs.push(q);
+    activeTabId = q.id;
   }
 
   // ================= 查询 =================
@@ -357,8 +464,8 @@
                         tabindex="0"
                         onclick={() => toggleTable(db.name, tb.name)}
                         onkeydown={(e) => e.key === 'Enter' && toggleTable(db.name, tb.name)}
-                        ondblclick={() => openTableSql(db.name, tb.name)}
-                        title="双击打开表数据"
+                        ondblclick={() => openTableTab(db.name, tb.name)}
+                        title="双击打开表（数据/结构/SQL）"
                       >
                         <span class="arrow">{treeOpen[`${db.name}.${tb.name}`] ? '▾' : '▸'}</span>
                         <span class="ico">📋</span>
@@ -404,6 +511,7 @@
               onclick={() => (activeTabId = t.id)}
               onkeydown={(e) => e.key === 'Enter' && (activeTabId = t.id)}
             >
+              <span class="tab-ico">{t.kind === 'table' ? '📋' : '❯'}</span>
               <span class="tab-title">{t.title}</span>
               <span
                 class="tab-close"
@@ -422,67 +530,196 @@
       {/if}
 
       {#if activeTab}
-        <div class="tab-content">
-          <div class="editor">
-            <textarea
-              bind:value={activeTab.sql}
-              placeholder="输入 SQL…（Cmd/Ctrl + Enter 执行）"
-              onkeydown={keydown}
-            ></textarea>
-            <div class="editor-bar">
-              <button onclick={() => runQuery()} disabled={!connId || activeTab.running}>
-                {activeTab.running ? '执行中…' : '▶ 执行'}
-              </button>
-              <span class="hint">Cmd+Enter 执行 · Cmd+N 新查询</span>
+        {#if activeTab.kind === 'query'}
+          <div class="tab-content">
+            <div class="editor">
+              <textarea
+                bind:value={activeTab.sql}
+                placeholder="输入 SQL…（Cmd/Ctrl + Enter 执行）"
+                onkeydown={keydown}
+              ></textarea>
+              <div class="editor-bar">
+                <button onclick={() => runQuery()} disabled={!connId || activeTab.running}>
+                  {activeTab.running ? '执行中…' : '▶ 执行'}
+                </button>
+                <span class="hint">Cmd+Enter 执行 · Cmd+N 新查询</span>
+              </div>
+            </div>
+
+            <div class="result">
+              {#if activeTab.error}
+                <div class="error">⚠ {activeTab.error}</div>
+              {/if}
+              {#if activeTab.affected !== null}
+                <div class="ok">✓ 影响行数：{activeTab.affected}</div>
+              {/if}
+              {#if activeTab.columns.length > 0}
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        {#each activeTab.columns as col}
+                          <th
+                            style={activeTab.colWidths[col.name] ? `width:${activeTab.colWidths[col.name]}` : ''}
+                          >
+                            {col.name}<small>{col.type_name}</small>
+                            <span
+                              class="resizer"
+                              role="presentation"
+                              onmousedown={(e) => startResize(e, activeTab, col.name)}
+                            ></span>
+                          </th>
+                        {/each}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each activeTab.rows as row, ri}
+                        <tr>
+                          {#each row as cell}
+                            <td class:null={isNull(cell)}>{cellText(cell)}</td>
+                          {/each}
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+                <div class="count">
+                  共 {activeTab.rows.length} 行
+                  {#if activeTab.elapsed !== null} · 耗时 {activeTab.elapsed.toFixed(0)} ms{/if}
+                </div>
+              {:else if !activeTab.error && activeTab.affected === null && !activeTab.running}
+                <div class="empty">连接后输入 SQL，点执行查看结果；双击左侧表直接浏览数据</div>
+              {/if}
             </div>
           </div>
+        {:else}
+          <!-- 表页签：数据 / 结构 / SQL 预览 -->
+          <div class="tab-content">
+            <div class="subtabbar">
+              <span
+                class="subtab"
+                class:active={activeTab.subTab === 'data'}
+                role="button"
+                tabindex="0"
+                onclick={() => setSubTab(activeTab, 'data')}
+                onkeydown={(e) => e.key === 'Enter' && setSubTab(activeTab, 'data')}
+                >数据</span
+              >
+              <span
+                class="subtab"
+                class:active={activeTab.subTab === 'structure'}
+                role="button"
+                tabindex="0"
+                onclick={() => setSubTab(activeTab, 'structure')}
+                onkeydown={(e) => e.key === 'Enter' && setSubTab(activeTab, 'structure')}
+                >结构</span
+              >
+              <span
+                class="subtab"
+                class:active={activeTab.subTab === 'sql'}
+                role="button"
+                tabindex="0"
+                onclick={() => setSubTab(activeTab, 'sql')}
+                onkeydown={(e) => e.key === 'Enter' && setSubTab(activeTab, 'sql')}
+                >SQL 预览</span
+              >
+              <span class="subtab-spacer"></span>
+              <span class="subtab-hint"
+                >{activeTab.dbname}.{activeTab.table} · 每页 {activeTab.pageSize} 行</span
+              >
+            </div>
 
-          <div class="result">
             {#if activeTab.error}
               <div class="error">⚠ {activeTab.error}</div>
             {/if}
-            {#if activeTab.affected !== null}
-              <div class="ok">✓ 影响行数：{activeTab.affected}</div>
-            {/if}
-            {#if activeTab.columns.length > 0}
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      {#each activeTab.columns as col}
-                        <th
-                          style={activeTab.colWidths[col.name] ? `width:${activeTab.colWidths[col.name]}` : ''}
-                        >
-                          {col.name}<small>{col.type_name}</small>
-                          <span
-                            class="resizer"
-                            role="presentation"
-                            onmousedown={(e) => startResize(e, activeTab, col.name)}
-                          ></span>
-                        </th>
-                      {/each}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {#each activeTab.rows as row, ri}
-                      <tr>
-                        {#each row as cell}
-                          <td class:null={isNull(cell)}>{cellText(cell)}</td>
+
+            {#if activeTab.subTab === 'data'}
+              <div class="result">
+                {#if activeTab.columns.length > 0}
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          {#each activeTab.columns as col}
+                            <th
+                              style={activeTab.colWidths[col.name] ? `width:${activeTab.colWidths[col.name]}` : ''}
+                            >
+                              {col.name}<small>{col.type_name}</small>
+                              <span
+                                class="resizer"
+                                role="presentation"
+                                onmousedown={(e) => startResize(e, activeTab, col.name)}
+                              ></span>
+                            </th>
+                          {/each}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {#each activeTab.rows as row}
+                          <tr>
+                            {#each row as cell}
+                              <td class:null={isNull(cell)}>{cellText(cell)}</td>
+                            {/each}
+                          </tr>
                         {/each}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="count">
+                    <span>
+                      {#if activeTab.loading}加载中…{:else}第 {activeTab.page} 页 · 共 {activeTab.total} 行{/if}
+                    </span>
+                    <span class="pager">
+                      <button onclick={() => tablePrev(activeTab)} disabled={activeTab.page! <= 1 || activeTab.loading}
+                        >‹ 上一页</button
+                      >
+                      <button
+                        onclick={() => tableNext(activeTab)}
+                        disabled={activeTab.total! <= activeTab.page! * activeTab.pageSize! || activeTab.loading}
+                        >下一页 ›</button
+                      >
+                    </span>
+                  </div>
+                {:else if !activeTab.loading}
+                  <div class="empty">表暂无数据</div>
+                {/if}
+              </div>
+            {:else if activeTab.subTab === 'structure'}
+              <div class="result">
+                <div class="table-wrap">
+                  <table class="struct-table">
+                    <thead>
+                      <tr>
+                        <th>字段名</th>
+                        <th>类型</th>
+                        <th>可空</th>
+                        <th>默认值</th>
                       </tr>
-                    {/each}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {#each activeTab.structure ?? [] as col}
+                        <tr>
+                          <td>{col.is_pk ? '🔑 ' : ''}{col.name}</td>
+                          <td>{col.type_name}</td>
+                          <td>{col.is_nullable === 'YES' ? '是' : '否'}</td>
+                          <td>{col.default ?? '—'}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+                <div class="count">共 {(activeTab.structure ?? []).length} 个字段</div>
               </div>
-              <div class="count">
-                共 {activeTab.rows.length} 行
-                {#if activeTab.elapsed !== null} · 耗时 {activeTab.elapsed.toFixed(0)} ms{/if}
+            {:else}
+              <div class="result">
+                <div class="sql-preview">
+                  <pre>SELECT * FROM "{activeTab.dbname}"."{activeTab.table}";</pre>
+                  <button onclick={() => openTableInEditor(activeTab)}>在编辑器中打开</button>
+                </div>
               </div>
-            {:else if !activeTab.error && activeTab.affected === null && !activeTab.running}
-              <div class="empty">连接后输入 SQL，点执行查看结果；双击左侧表直接浏览数据</div>
             {/if}
           </div>
-        </div>
+        {/if}
       {:else}
         <div class="empty">连接后点击「＋ 新建查询」开始</div>
       {/if}
@@ -775,6 +1012,102 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+
+  .tab-ico {
+    font-size: 11px;
+    opacity: 0.8;
+  }
+
+  /* 表页签子标签栏 */
+  .subtabbar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 14px;
+    background: #171a20;
+    border-bottom: 1px solid #2c303a;
+    min-height: 34px;
+  }
+
+  .subtab {
+    padding: 8px 14px;
+    color: #8b93a3;
+    cursor: pointer;
+    font-size: 12px;
+    border-bottom: 2px solid transparent;
+    user-select: none;
+  }
+
+  .subtab:hover {
+    color: #d7dae0;
+  }
+
+  .subtab.active {
+    color: #4fc3f7;
+    border-bottom-color: #4fc3f7;
+  }
+
+  .subtab-spacer {
+    flex: 1;
+  }
+
+  .subtab-hint {
+    color: #5c6472;
+    font-size: 11px;
+  }
+
+  .pager {
+    display: inline-flex;
+    gap: 6px;
+    margin-left: auto;
+  }
+
+  .pager button {
+    background: #262a33;
+    border: 1px solid #363b47;
+    border-radius: 5px;
+    color: #aab2c0;
+    padding: 2px 10px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .pager button:hover:not(:disabled) {
+    background: #2f6fed;
+    color: #fff;
+    border-color: #2f6fed;
+  }
+
+  .pager button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .count {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .sql-preview {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .sql-preview pre {
+    margin: 0;
+    padding: 14px 16px;
+    background: #242833;
+    border: 1px solid #363b47;
+    border-radius: 8px;
+    color: #c9e2b4;
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
   }
 
   .editor {

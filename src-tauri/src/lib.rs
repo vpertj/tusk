@@ -19,7 +19,7 @@ struct AppState {
     conns: Mutex<HashMap<String, ConnEntry>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct ColumnInfo {
     name: String,
     type_name: String,
@@ -327,6 +327,73 @@ async fn list_columns_core(
         .collect())
 }
 
+#[derive(Serialize, Debug)]
+struct TablePage {
+    columns: Vec<ColumnInfo>,
+    rows: Vec<Vec<serde_json::Value>>,
+    total: Option<i64>,
+}
+
+/// 核心：分页读取表数据（SELECT * + LIMIT/OFFSET + 总行数）
+/// 表名来自对象树（合法标识符），做双引号转义防注入
+async fn paginate_table_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    table: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<TablePage, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    let qtable = format!("\"{}\"", table.replace('"', "\"\""));
+    let sql = format!("SELECT * FROM {qtable} LIMIT $1 OFFSET $2");
+    let stmt = client
+        .prepare(&sql)
+        .await
+        .map_err(|e| format!("SQL 预编译失败: {e}"))?;
+    let rows = client
+        .query(&stmt, &[&(limit as i64), &(offset as i64)])
+        .await
+        .map_err(|e| format!("查询失败: {e}"))?;
+    let columns: Vec<ColumnInfo> = stmt
+        .columns()
+        .iter()
+        .map(|c| ColumnInfo {
+            name: c.name().to_string(),
+            type_name: c.type_().name().to_string(),
+        })
+        .collect();
+    let rows: Vec<Vec<serde_json::Value>> = rows.iter().map(row_to_json).collect();
+    let total: i64 = client
+        .query_one(&format!("SELECT count(*) FROM {qtable}"), &[])
+        .await
+        .map_err(|e| format!("查询总行数失败: {e}"))?
+        .get(0);
+    Ok(TablePage {
+        columns,
+        rows,
+        total: Some(total),
+    })
+}
+
+/// 分页读取表数据（Tauri command 入口）
+#[tauri::command]
+async fn paginate_table(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+    limit: u32,
+    offset: u32,
+) -> Result<TablePage, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    paginate_table_core(&cfg, &dbname, &table, limit, offset).await
+}
+
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
 /// 这里自定义解码（PostgreSQL wire format，精度无损）
 struct NumericString(String);
@@ -583,6 +650,30 @@ mod tests {
             "每个字段都应有可空标记"
         );
     }
+
+    #[tokio::test]
+    async fn test_pagination() {
+        let cfg = test_cfg();
+        let page1 = paginate_table_core(&cfg, "tusk_demo", "products", 2, 0)
+            .await
+            .expect("第一页失败");
+        assert_eq!(page1.rows.len(), 2, "limit=2 应返回 2 行");
+        assert_eq!(page1.total, Some(4), "products 共 4 行");
+
+        let page2 = paginate_table_core(&cfg, "tusk_demo", "products", 2, 2)
+            .await
+            .expect("第二页失败");
+        assert_eq!(page2.rows.len(), 2);
+
+        // 两页数据不重叠（按 id 判断）
+        let id1: Vec<i64> = page1.rows.iter().map(|r| r[0].as_i64().unwrap()).collect();
+        let id2: Vec<i64> = page2.rows.iter().map(|r| r[0].as_i64().unwrap()).collect();
+        assert!(
+            id1.iter().all(|x| !id2.contains(x)),
+            "两页 id 不应重叠: {id1:?} vs {id2:?}"
+        );
+        assert_eq!(page1.columns[0].name, "id", "首列应为 id");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -598,7 +689,8 @@ pub fn run() {
             query,
             list_databases,
             list_tables,
-            list_columns
+            list_columns,
+            paginate_table
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
