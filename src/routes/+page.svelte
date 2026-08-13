@@ -610,8 +610,8 @@
               </div>
               <div class="field-actions">
                 <label class="save-label">
-                  <input type="checkbox" bind:checked={saveConn} />
                   保存此连接
+                  <input type="checkbox" bind:checked={saveConn} />
                 </label>
                 <button onclick={doConnect} disabled={connecting} class="primary">
                   {connecting ? '连接中…' : '连接'}
