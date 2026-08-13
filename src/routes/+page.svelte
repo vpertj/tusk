@@ -288,6 +288,44 @@
   // 删除表确认弹窗（WKWebView 不支持 window.confirm，必须自定义）
   let confirmDrop = $state<{ db: string; table: string } | null>(null);
 
+  // ===== 表右键菜单 + 复制表 =====
+  let tableMenu = $state<{ x: number; y: number; db: string; table: string } | null>(null);
+  let dupDialog = $state<{
+    db: string;
+    table: string;
+    withData: boolean;
+    name: string;
+    err: string;
+  } | null>(null);
+
+  function openTableMenu(e: MouseEvent, db: string, table: string) {
+    e.preventDefault();
+    tableMenu = { x: e.clientX, y: e.clientY, db, table };
+  }
+
+  async function doDuplicate() {
+    const d = dupDialog;
+    if (!d) return;
+    if (!d.name.trim()) {
+      d.err = '新表名不能为空';
+      return;
+    }
+    try {
+      await invoke('duplicate_table', {
+        connId,
+        dbname: d.db,
+        srcTable: d.table,
+        newTable: d.name.trim(),
+        withData: d.withData,
+      });
+      dupDialog = null;
+      await refreshTables(d.db);
+      openTableTab(d.db, d.name.trim());
+    } catch (e) {
+      d.err = String(e);
+    }
+  }
+
   // 删除表（对象树入口）
   function dropTableFromTree(db: string, table: string) {
     confirmDrop = { db, table };
@@ -1025,7 +1063,8 @@
                         tabindex="0"
                         onclick={() => openTableTab(db.name, tb.name)}
                         onkeydown={(e) => e.key === 'Enter' && openTableTab(db.name, tb.name)}
-                        title="单击打开表（数据/结构/SQL）"
+                        oncontextmenu={(e) => openTableMenu(e, db.name, tb.name)}
+                        title="单击打开表 · 右键更多操作"
                       >
                         <span
                           class="arrow"
@@ -1509,6 +1548,105 @@
             <button onclick={() => (showDesigner = false)}>取消</button>
             <button onclick={doCreateTable} class="primary">
               {editingTable ? '保存修改' : '创建表'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ============ 表右键菜单 ============ -->
+  {#if tableMenu}
+    <div
+      class="ctx-overlay"
+      role="presentation"
+      onclick={() => (tableMenu = null)}
+      oncontextmenu={(e) => {
+        e.preventDefault();
+        tableMenu = null;
+      }}
+    ></div>
+    <div class="ctx-menu" style="left:{tableMenu!.x}px; top:{tableMenu!.y}px">
+      <button
+        onclick={() => {
+          openTableTab(tableMenu!.db, tableMenu!.table);
+          tableMenu = null;
+        }}
+        >📖 打开表</button
+      >
+      <button
+        onclick={() => {
+          openDesignerForEdit(tableMenu!.db, tableMenu!.table);
+          tableMenu = null;
+        }}
+        >✎ 编辑表结构</button
+      >
+      <div class="ctx-sep"></div>
+      <button
+        onclick={() => {
+          dupDialog = {
+            db: tableMenu!.db,
+            table: tableMenu!.table,
+            withData: false,
+            name: `${tableMenu!.table}_copy`,
+            err: '',
+          };
+          tableMenu = null;
+        }}
+        >⧉ 复制表结构</button
+      >
+      <button
+        onclick={() => {
+          dupDialog = {
+            db: tableMenu!.db,
+            table: tableMenu!.table,
+            withData: true,
+            name: `${tableMenu!.table}_copy`,
+            err: '',
+          };
+          tableMenu = null;
+        }}
+        >⧉ 复制表（含数据）</button
+      >
+      <div class="ctx-sep"></div>
+      <button
+        class="ctx-danger"
+        onclick={() => {
+          dropTableFromTree(tableMenu!.db, tableMenu!.table);
+          tableMenu = null;
+        }}
+        >🗑 删除表</button
+      >
+    </div>
+  {/if}
+
+  <!-- ============ 复制表（输入新表名） ============ -->
+  {#if dupDialog}
+    <div class="overlay" role="presentation" onclick={() => (dupDialog = null)}>
+      <div
+        class="conn-dialog confirm-dialog"
+        role="dialog"
+        aria-label="复制表"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (dupDialog = null)}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">⧉ 复制表：{dupDialog.table}</span>
+          <button class="dialog-close" onclick={() => (dupDialog = null)}>×</button>
+        </div>
+        <div class="dialog-body">
+          {#if dupDialog.err}
+            <div class="error">⚠ {dupDialog.err}</div>
+          {/if}
+          <div class="field">
+            <label for="dup-name">新表名</label>
+            <input id="dup-name" bind:value={dupDialog.name} placeholder="新表名" />
+          </div>
+          <div class="field-actions" style="margin-top:16px">
+            <button onclick={() => (dupDialog = null)}>取消</button>
+            <button onclick={doDuplicate} class="primary">
+              {dupDialog.withData ? '复制表和数据' : '复制结构'}
             </button>
           </div>
         </div>
@@ -2088,6 +2226,52 @@
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+
+  /* 右键菜单 */
+  .ctx-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+  }
+
+  .ctx-menu {
+    position: fixed;
+    z-index: 201;
+    min-width: 180px;
+    background: #22262f;
+    border: 1px solid #363b47;
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .ctx-menu button {
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    color: #d7dae0;
+    font-size: 12px;
+    text-align: left;
+    padding: 7px 10px;
+    cursor: pointer;
+  }
+
+  .ctx-menu button:hover {
+    background: #2f6fed;
+    color: #fff;
+  }
+
+  .ctx-sep {
+    height: 1px;
+    background: #363b47;
+    margin: 4px 6px;
+  }
+
+  .ctx-menu button.ctx-danger:hover {
+    background: #d64545;
   }
 
   /* 删除表确认弹窗 */

@@ -1338,6 +1338,108 @@ async fn alter_table(
     alter_table_core(&cfg, &dbname, &table, columns).await
 }
 
+
+/// 核心：复制表（结构 or 结构+数据）。serial 列自动重建独立序列
+async fn duplicate_table_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    src_table: &str,
+    new_table: &str,
+    with_data: bool,
+) -> Result<(), String> {
+    if new_table.trim().is_empty() {
+        return Err("新表名不能为空".into());
+    }
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    let qsrc = quote_ident(src_table);
+    let qnew = quote_ident(new_table);
+
+    // 结构复制（含主键/索引/约束/默认值）
+    let sql = format!("CREATE TABLE {qnew} (LIKE {qsrc} INCLUDING ALL)");
+    client
+        .execute(&sql, &[])
+        .await
+        .map_err(|e| format!("创建新表失败: {e}"))?;
+
+    // serial 列：默认值仍指向旧序列，需重建独立序列
+    let tbl_lit_src = format!("\"{}\"", src_table.replace('"', "\"\""));
+    let seq_sql = format!(
+        "SELECT a.attname, pg_get_expr(d.adbin, d.adrelid)
+         FROM pg_attribute a
+         JOIN pg_type t ON t.oid = a.atttypid
+         JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+         WHERE a.attrelid = '{tbl_lit_src}'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+           AND pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%'"
+    );
+    let seq_rows = client
+        .query(&seq_sql, &[])
+        .await
+        .map_err(|e| format!("查询序列列失败: {e}"))?;
+
+    let tbl_lit = format!("\"{new_table}\"");
+    for r in &seq_rows {
+        let col: String = r.get(0);
+        let seq_name = format!("{new_table}_{col}_seq");
+        let qseq = quote_ident(&seq_name);
+        let qcol = quote_ident(&col);
+        // 新序列（从源表当前值之后开始）
+        let start_sql = if with_data {
+            format!("SELECT COALESCE(MAX({qcol})::bigint, 0) + 1 FROM {qsrc}")
+        } else {
+            "SELECT 1::bigint".to_string()
+        };
+        let start_val: i64 = client
+            .query_one(&start_sql, &[])
+            .await
+            .map_err(|e| format!("计算序列起点失败: {e}"))?
+            .get(0);
+        let create_seq = format!(
+            "CREATE SEQUENCE {qseq} START WITH {start_val} OWNED BY {qnew}.{qcol}"
+        );
+        client
+            .execute(&create_seq, &[])
+            .await
+            .map_err(|e| format!("创建序列失败: {e}"))?;
+        let set_def = format!(
+            "ALTER TABLE {qnew} ALTER COLUMN {qcol} SET DEFAULT nextval('{seq_name}'::regclass)"
+        );
+        client
+            .execute(&set_def, &[])
+            .await
+            .map_err(|e| format!("设置默认值失败: {e}"))?;
+        let _ = tbl_lit;
+    }
+
+    // 数据复制
+    if with_data {
+        let copy_sql = format!("INSERT INTO {qnew} SELECT * FROM {qsrc}");
+        client
+            .execute(&copy_sql, &[])
+            .await
+            .map_err(|e| format!("复制数据失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 复制表（Tauri command 入口）
+#[tauri::command]
+async fn duplicate_table(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    src_table: String,
+    new_table: String,
+    with_data: bool,
+) -> Result<(), String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    duplicate_table_core(&cfg, &dbname, &src_table, &new_table, with_data).await
+}
+
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
 /// 这里自定义解码（PostgreSQL wire format，精度无损）
 struct NumericString(String);
@@ -2245,6 +2347,91 @@ mod tests {
 
         drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
     }
+
+    #[tokio::test]
+    async fn test_duplicate_table() {
+        let cfg = test_cfg();
+        let src = format!("tusk_dup_src_{}", std::process::id());
+        let dst_struct = format!("tusk_dup_struct_{}", std::process::id());
+        let dst_full = format!("tusk_dup_full_{}", std::process::id());
+
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &src,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: false, default: None, is_pk: false, is_serial: false },
+                ColumnDef { name: "price".into(), col_type: "numeric(10,2)".into(), nullable: true, default: Some("0".into()), is_pk: false, is_serial: false },
+            ],
+        )
+        .await
+        .expect("建源表失败");
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        client
+            .execute(&format!("INSERT INTO \"{src}\" (name, price) VALUES ('A', 1.5), ('B', 2.5)"), &[])
+            .await
+            .expect("插入失败");
+
+        // 1) 仅结构复制
+        duplicate_table_core(&cfg, "tusk_demo", &src, &dst_struct, false)
+            .await
+            .expect("结构复制失败");
+        let cnt: i64 = client
+            .query_one(&format!("SELECT count(*) FROM \"{dst_struct}\""), &[])
+            .await
+            .expect("q")
+            .get(0);
+        assert_eq!(cnt, 0, "仅结构复制不应有数据");
+        let pk: i64 = client
+            .query_one(
+                "SELECT count(*) FROM information_schema.table_constraints WHERE table_name = $1 AND constraint_type = 'PRIMARY KEY'",
+                &[&dst_struct],
+            )
+            .await
+            .expect("q")
+            .get(0);
+        assert_eq!(pk, 1, "主键应复制");
+        // 序列独立：新表插入自增从 1 开始
+        client
+            .execute(&format!("INSERT INTO \"{dst_struct}\" (name) VALUES ('X')"), &[])
+            .await
+            .expect("新表插入失败");
+        let new_id: i32 = client
+            .query_one(&format!("SELECT id FROM \"{dst_struct}\""), &[])
+            .await
+            .expect("q")
+            .get(0);
+        assert_eq!(new_id, 1, "新表序列应从 1 开始");
+
+        // 2) 结构+数据复制
+        duplicate_table_core(&cfg, "tusk_demo", &src, &dst_full, true)
+            .await
+            .expect("全量复制失败");
+        let cnt2: i64 = client
+            .query_one(&format!("SELECT count(*) FROM \"{dst_full}\""), &[])
+            .await
+            .expect("q")
+            .get(0);
+        assert_eq!(cnt2, 2, "数据应复制 2 行");
+        let first_name: String = client
+            .query_one(&format!("SELECT name FROM \"{dst_full}\" WHERE id = 1"), &[])
+            .await
+            .expect("q")
+            .get(0);
+        assert_eq!(first_name, "A");
+
+        // 3) 重名冲突报错
+        let err = duplicate_table_core(&cfg, "tusk_demo", &src, &src, false)
+            .await
+            .expect_err("重名应报错");
+        assert!(!err.is_empty());
+
+        // 清理
+        for t in [&src, &dst_struct, &dst_full] {
+            drop_table_core(&cfg, "tusk_demo", t).await.expect("清理失败");
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2273,7 +2460,8 @@ pub fn run() {
             explain_query,
             create_table,
             drop_table,
-            alter_table
+            alter_table,
+            duplicate_table
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
