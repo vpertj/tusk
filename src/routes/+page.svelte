@@ -122,6 +122,7 @@
     'bytea',
   ];
   let showDesigner = $state(false);
+  let editingTable = $state<{ db: string; table: string } | null>(null);
   let designerDb = $state('');
   let designerName = $state('');
   let designerError = $state('');
@@ -142,6 +143,7 @@
   ]);
 
   function openDesigner() {
+    editingTable = null;
     designerDb = dbs[0]?.name ?? dbname;
     designerName = '';
     designerError = '';
@@ -150,6 +152,50 @@
       { id: ++designerSeq, name: 'name', baseType: 'text', length: '', nullable: false, default: '', isPk: false, isSerial: false },
     ];
     showDesigner = true;
+  }
+
+  // 打开已有表的设计器（预填当前结构）
+  async function openDesignerForEdit(db: string, table: string) {
+    try {
+      const cols = await invoke<SchemaColumn[]>('list_columns', { connId, dbname: db, table });
+      editingTable = { db, table };
+      designerDb = db;
+      designerName = table;
+      designerError = '';
+      const typeMap: Record<string, string> = {
+        int4: 'int4', int8: 'int8', text: 'text', varchar: 'varchar', numeric: 'numeric',
+        float8: 'float8', bool: 'bool', date: 'date', timestamp: 'timestamp',
+        timestamptz: 'timestamptz', time: 'time', jsonb: 'jsonb', uuid: 'uuid', bytea: 'bytea',
+      };
+      designerCols = cols.map((c) => {
+        const m = c.type_name.match(/^(\w+)\((.+)\)$/);
+        let baseType = c.type_name;
+        let length = '';
+        if (m) {
+          baseType = m[1];
+          length = m[2];
+        }
+        const isSerial = (c.default ?? '').includes('nextval(');
+        if (isSerial) {
+          baseType = c.default!.includes('bigint') || c.default!.includes('bigserial') ? 'bigserial' : 'serial';
+        } else {
+          baseType = typeMap[baseType] ?? baseType;
+        }
+        return {
+          id: ++designerSeq,
+          name: c.name,
+          baseType,
+          length,
+          nullable: c.is_nullable === 'YES',
+          default: isSerial ? '' : (c.default ?? ''),
+          isPk: c.is_pk,
+          isSerial,
+        };
+      });
+      showDesigner = true;
+    } catch (e) {
+      status = `加载表结构失败: ${e}`;
+    }
   }
 
   function addDesignerCol() {
@@ -175,7 +221,7 @@
       designerError = '请填写表名';
       return;
     }
-    const columns = designerCols.map((c) => ({
+    const cols = designerCols.map((c) => ({
       name: c.name.trim(),
       col_type: buildColType(c),
       nullable: c.nullable,
@@ -183,20 +229,47 @@
       is_pk: c.isPk,
       is_serial: c.isSerial || c.baseType === 'serial' || c.baseType === 'bigserial',
     }));
-    if (columns.some((c) => !c.name)) {
+    if (cols.some((c) => !c.name)) {
       designerError = '字段名不能为空';
       return;
     }
     try {
-      await invoke('create_table', {
-        connId,
-        dbname: designerDb,
-        table: designerName.trim(),
-        columns,
-      });
+      if (editingTable) {
+        await invoke('alter_table', {
+          connId,
+          dbname: editingTable.db,
+          table: editingTable.table,
+          columns: cols,
+        });
+        // 刷新已打开的表页签（结构 + 数据）
+        const openTab = tabs.find(
+          (t) => t.kind === 'table' && t.dbname === editingTable!.db && t.table === editingTable!.table,
+        );
+        if (openTab) {
+          loadStructure(openTab);
+          loadTablePage(openTab);
+        }
+        refreshTables(editingTable.db);
+        const ck = `${editingTable.db}.${editingTable.table}`;
+        if (columns[ck]) {
+          columns[ck] = await invoke<SchemaColumn[]>('list_columns', {
+            connId,
+            dbname: editingTable.db,
+            table: editingTable.table,
+          });
+        }
+      } else {
+        await invoke('create_table', {
+          connId,
+          dbname: designerDb,
+          table: designerName.trim(),
+          columns: cols,
+        });
+        await refreshTables(designerDb);
+        openTableTab(designerDb, designerName.trim());
+      }
       showDesigner = false;
-      await refreshTables(designerDb);
-      openTableTab(designerDb, designerName.trim());
+      editingTable = null;
     } catch (e) {
       designerError = String(e);
     }
@@ -975,6 +1048,15 @@
                           class="tree-del"
                           onclick={(e) => {
                             e.stopPropagation();
+                            openDesignerForEdit(db.name, tb.name);
+                          }}
+                          title="编辑表结构"
+                          >✎</button
+                        >
+                        <button
+                          class="tree-del"
+                          onclick={(e) => {
+                            e.stopPropagation();
                             dropTableFromTree(db.name, tb.name);
                           }}
                           title="删除表（不可恢复）"
@@ -1267,6 +1349,13 @@
               </div>
             {:else if activeTab.subTab === 'structure'}
               <div class="result">
+                <div class="struct-toolbar">
+                  <button
+                    onclick={() => openDesignerForEdit(activeTab.dbname!, activeTab.table!)}
+                    title="修改表结构（增删字段/改类型/改默认值）"
+                    >✎ 编辑结构</button
+                  >
+                </div>
                 <div class="table-wrap">
                   <table class="struct-table">
                     <thead>
@@ -1319,7 +1408,7 @@
         onkeydown={(e) => e.key === 'Escape' && (showDesigner = false)}
       >
         <div class="dialog-head">
-          <span class="dialog-title">📋 新建表</span>
+          <span class="dialog-title">📋 {editingTable ? `编辑表：${editingTable.table}` : '新建表'}</span>
           <button class="dialog-close" onclick={() => (showDesigner = false)}>×</button>
         </div>
         <div class="dialog-body">
@@ -1328,11 +1417,16 @@
           {/if}
           <div class="field">
             <label for="d-tname">表名</label>
-            <input id="d-tname" bind:value={designerName} placeholder="表名" />
+            <input
+              id="d-tname"
+              bind:value={designerName}
+              placeholder="表名"
+              disabled={!!editingTable}
+            />
           </div>
           <div class="field">
             <label for="d-db">数据库</label>
-            <select id="d-db" bind:value={designerDb}>
+            <select id="d-db" bind:value={designerDb} disabled={!!editingTable}>
               {#each dbs as db}
                 <option value={db.name}>{db.name}</option>
               {/each}
@@ -1380,6 +1474,9 @@
                 </span>
                 <span class="dg-type">
                   <select bind:value={c.baseType}>
+                    {#if !DESIGNER_TYPES.includes(c.baseType)}
+                      <option value={c.baseType} disabled>{c.baseType}</option>
+                    {/if}
                     {#each DESIGNER_TYPES as t}
                       <option value={t}>{t}</option>
                     {/each}
@@ -1410,7 +1507,9 @@
           <button onclick={addDesignerCol} class="add-col">＋ 添加字段</button>
           <div class="field-actions" style="margin-top:16px">
             <button onclick={() => (showDesigner = false)}>取消</button>
-            <button onclick={doCreateTable} class="primary">创建表</button>
+            <button onclick={doCreateTable} class="primary">
+              {editingTable ? '保存修改' : '创建表'}
+            </button>
           </div>
         </div>
       </div>
@@ -2143,6 +2242,30 @@
   }
 
   /* ===== 表设计器 ===== */
+
+  /* 结构子标签工具栏 */
+  .struct-toolbar {
+    display: flex;
+    align-items: center;
+    padding: 8px 14px;
+    background: #171a20;
+    border-bottom: 1px solid #2c303a;
+  }
+
+  .struct-toolbar button {
+    background: #262a33;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #aab2c0;
+    padding: 4px 12px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .struct-toolbar button:hover {
+    border-color: #4fc3f7;
+    color: #d7dae0;
+  }
 
   /* 数据页工具栏 */
   .data-toolbar {
