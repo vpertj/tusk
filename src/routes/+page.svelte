@@ -7,11 +7,12 @@
   let user = $state('');
   let password = $state('');
   let dbname = $state('postgres');
+  let dbType = $state('postgres');
   let showConnPanel = $state(true);
   let connName = $state('');
   let saveConn = $state(false);
   let savedConns = $state<
-    { name: string; host: string; port: number; user: string; dbname: string }[]
+    { db_type: string; name: string; host: string; port: number; user: string; dbname: string }[]
   >([]);
 
   async function loadSavedConns() {
@@ -178,6 +179,7 @@
       if (saveConn && connName.trim()) {
         try {
           await invoke('save_connection', {
+            dbType,
             name: connName.trim(),
             host,
             port,
@@ -557,7 +559,10 @@
                     <span class="conn-ico">🔌</span>
                     <span class="conn-main">
                       <span class="conn-name">{sc.name}</span>
-                      <span class="conn-sub">{sc.user}@{sc.host}:{sc.port} · {sc.dbname}</span>
+                      <span class="conn-sub">
+                        <span class="badge">{sc.db_type === 'mysql' ? 'MySQL' : 'PG'}</span>
+                        {sc.user}@{sc.host}:{sc.port} · {sc.dbname}
+                      </span>
                     </span>
                   </button>
                   <button
@@ -571,22 +576,47 @@
               <div class="divider"></div>
             {/if}
             <div class="saved-title">新建连接</div>
-            <div class="conn-form">
-              <input bind:value={host} placeholder="host" />
-              <input bind:value={port} type="number" placeholder="port" class="narrow" />
-              <input bind:value={user} placeholder="user" />
-              <input bind:value={password} type="password" placeholder="password" />
-              <input bind:value={dbname} placeholder="database" />
-            </div>
-            <div class="conn-extra">
-              <input bind:value={connName} placeholder="连接名（保存后一键连接）" />
-              <label class="save-label">
-                <input type="checkbox" bind:checked={saveConn} />
-                保存此连接
-              </label>
-              <button onclick={doConnect} disabled={connecting} class="primary">
-                {connecting ? '连接中…' : '连接'}
-              </button>
+            <div class="conn-form-v">
+              <div class="field">
+                <label for="f-dbtype">数据库类型</label>
+                <select id="f-dbtype" bind:value={dbType}>
+                  <option value="postgres">PostgreSQL 🐘</option>
+                  <option value="mysql" disabled>MySQL（即将支持）</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="f-host">连接地址</label>
+                <input id="f-host" bind:value={host} placeholder="localhost" />
+              </div>
+              <div class="field">
+                <label for="f-port">端口</label>
+                <input id="f-port" bind:value={port} type="number" placeholder="5432" />
+              </div>
+              <div class="field">
+                <label for="f-user">用户名</label>
+                <input id="f-user" bind:value={user} placeholder="postgres" />
+              </div>
+              <div class="field">
+                <label for="f-pass">密码</label>
+                <input id="f-pass" bind:value={password} type="password" placeholder="留空表示免密" />
+              </div>
+              <div class="field">
+                <label for="f-db">数据库名</label>
+                <input id="f-db" bind:value={dbname} placeholder="postgres" />
+              </div>
+              <div class="field">
+                <label for="f-cname">连接名</label>
+                <input id="f-cname" bind:value={connName} placeholder="保存后一键连接（可选）" />
+              </div>
+              <div class="field-actions">
+                <label class="save-label">
+                  <input type="checkbox" bind:checked={saveConn} />
+                  保存此连接
+                </label>
+                <button onclick={doConnect} disabled={connecting} class="primary">
+                  {connecting ? '连接中…' : '连接'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1082,20 +1112,60 @@
     margin: 12px 0;
   }
 
-  .conn-form {
+  /* 新建连接纵向表单 */
+  .conn-form-v {
     display: flex;
-    gap: 6px;
-    margin-bottom: 10px;
+    flex-direction: column;
+    gap: 10px;
   }
 
-  .conn-extra {
+  .field {
     display: flex;
     align-items: center;
     gap: 12px;
   }
 
-  .conn-extra input:not([type]) {
+  .field label {
+    width: 84px;
+    flex-shrink: 0;
+    color: #aab2c0;
+    font-size: 12px;
+    text-align: right;
+  }
+
+  .field input,
+  .field select {
     flex: 1;
+    background: #262a33;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #d7dae0;
+    padding: 7px 12px;
+    font-size: 12px;
+  }
+
+  .field input:focus,
+  .field select:focus {
+    outline: none;
+    border-color: #4fc3f7;
+  }
+
+  .field select {
+    appearance: none;
+    cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, #8b93a3 50%),
+      linear-gradient(135deg, #8b93a3 50%, transparent 50%);
+    background-position: calc(100% - 16px) 55%, calc(100% - 11px) 55%;
+    background-size: 5px 5px;
+    background-repeat: no-repeat;
+  }
+
+  .field-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 4px;
   }
 
   .save-label {
@@ -1169,6 +1239,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .badge {
+    background: #2f6fed22;
+    border: 1px solid #2f6fed55;
+    color: #4fc3f7;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    flex-shrink: 0;
   }
 
   .saved-del {
@@ -1196,10 +1279,6 @@
     font-size: 12px;
     min-width: 60px;
     flex: 1;
-  }
-
-  input.narrow {
-    flex: 0 0 70px;
   }
 
   input:focus {

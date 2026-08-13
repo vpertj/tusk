@@ -543,8 +543,14 @@ async fn paginate_table(
 
 // ================= 连接管理（配置 JSON + Keychain 密码） =================
 
+fn default_db_type() -> String {
+    "postgres".into()
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct SavedConn {
+    #[serde(default = "default_db_type")]
+    db_type: String,
     name: String,
     host: String,
     port: u16,
@@ -663,6 +669,9 @@ async fn connect_saved_core(name: &str) -> Result<(ConnConfig, String), String> 
         .iter()
         .find(|c| c.name == name)
         .ok_or_else(|| format!("连接「{name}」不存在"))?;
+    if conn.db_type != "postgres" {
+        return Err(format!("暂不支持数据库类型：{}", conn.db_type));
+    }
     let password = keychain_get(name)?.unwrap_or_default();
     Ok((
         ConnConfig {
@@ -679,6 +688,7 @@ async fn connect_saved_core(name: &str) -> Result<(ConnConfig, String), String> 
 /// 保存连接（Tauri command 入口）
 #[tauri::command]
 async fn save_connection(
+    db_type: String,
     name: String,
     host: String,
     port: u16,
@@ -687,6 +697,7 @@ async fn save_connection(
     dbname: String,
 ) -> Result<(), String> {
     let conn = SavedConn {
+        db_type,
         name,
         host,
         port,
@@ -1096,6 +1107,7 @@ mod tests {
         std::env::set_var("TUSK_CONNS_DIR", &dir);
 
         let conn = SavedConn {
+            db_type: "postgres".into(),
             name: "本地测试库".into(),
             host: "localhost".into(),
             port: 5432,
