@@ -933,7 +933,12 @@ async fn update_cell(
         let conns = state.conns.lock().await;
         conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
     };
-    update_cell_core(&cfg, &dbname, &table, pk_cols, pk_vals, col, col_type, value).await
+    let res = update_cell_core(&cfg, &dbname, &table, pk_cols.clone(), pk_vals.clone(), col.clone(), col_type.clone(), value.clone()).await;
+    match &res {
+        Ok(n) => eprintln!("[tusk] update_cell {dbname}.{table} SET {col} pk={pk_cols:?}{pk_vals:?} value={value:?} -> {n} 行"),
+        Err(e) => eprintln!("[tusk] update_cell ERROR {dbname}.{table} SET {col} value={value:?}: {e}"),
+    }
+    res
 }
 
 /// 删除行（Tauri command 入口）
@@ -950,7 +955,12 @@ async fn delete_row(
         let conns = state.conns.lock().await;
         conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
     };
-    delete_row_core(&cfg, &dbname, &table, pk_cols, pk_vals).await
+    let res = delete_row_core(&cfg, &dbname, &table, pk_cols.clone(), pk_vals.clone()).await;
+    match &res {
+        Ok(n) => eprintln!("[tusk] delete_row {dbname}.{table} pk={pk_cols:?}{pk_vals:?} -> {n} 行"),
+        Err(e) => eprintln!("[tusk] delete_row ERROR {dbname}.{table}: {e}"),
+    }
+    res
 }
 
 /// 插入行（Tauri command 入口）

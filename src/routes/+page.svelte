@@ -362,8 +362,9 @@
       t.colWidths = {};
     } catch (e) {
       t.error = String(e);
-      t.rows = [];
-      t.columns = [];
+      t.loading = false;
+      // 失败时保留原有数据，绝不清空表格
+      return;
     }
     t.loading = false;
   }
