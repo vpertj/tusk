@@ -8,6 +8,20 @@
   let password = $state('');
   let dbname = $state('postgres');
   let showConnPanel = $state(true);
+  let connName = $state('');
+  let saveConn = $state(false);
+  let savedConns = $state<
+    { name: string; host: string; port: number; user: string; dbname: string }[]
+  >([]);
+
+  async function loadSavedConns() {
+    try {
+      savedConns = await invoke('list_connections');
+    } catch {
+      savedConns = [];
+    }
+  }
+  loadSavedConns();
 
   // ================= 连接状态 =================
   let connId = $state('');
@@ -160,12 +174,56 @@
       showConnPanel = false;
       ensureTab();
       await loadDbs();
+      // 勾选保存时写入连接管理
+      if (saveConn && connName.trim()) {
+        try {
+          await invoke('save_connection', {
+            name: connName.trim(),
+            host,
+            port,
+            user,
+            password,
+            dbname,
+          });
+          await loadSavedConns();
+        } catch {
+          // 保存失败不影响连接
+        }
+      }
     } catch (e) {
       status = '连接失败';
       const t = ensureTab();
       t.error = String(e);
     }
     connecting = false;
+  }
+
+  // 用已保存的连接一键连接
+  async function connectSaved(name: string) {
+    connecting = true;
+    try {
+      const info = await invoke<{ id: string; version: string }>('connect_saved', { name });
+      connId = info.id;
+      version = info.version;
+      status = `已连接 · ${name}`;
+      showConnPanel = false;
+      ensureTab();
+      await loadDbs();
+    } catch (e) {
+      status = '连接失败';
+      const t = ensureTab();
+      t.error = String(e);
+    }
+    connecting = false;
+  }
+
+  async function deleteSaved(name: string) {
+    try {
+      await invoke('delete_connection', { name });
+      await loadSavedConns();
+    } catch {
+      // 忽略
+    }
   }
 
   async function doDisconnect() {
@@ -474,6 +532,29 @@
     <!-- ============ 连接面板（未连接时显示） ============ -->
     {#if showConnPanel && !connId}
       <div class="conn-panel">
+        {#if savedConns.length > 0}
+          <div class="saved-list">
+            <div class="saved-title">已保存的连接</div>
+            {#each savedConns as sc}
+              <div class="saved-item">
+                <button
+                  class="saved-connect"
+                  onclick={() => connectSaved(sc.name)}
+                  disabled={connecting}
+                >
+                  🔌 {sc.name}
+                  <small>{sc.user}@{sc.host}:{sc.port} / {sc.dbname}</small>
+                </button>
+                <button
+                  class="saved-del"
+                  onclick={() => deleteSaved(sc.name)}
+                  title="删除该连接"
+                  >×</button
+                >
+              </div>
+            {/each}
+          </div>
+        {/if}
         <div class="conn-form">
           <input bind:value={host} placeholder="host" />
           <input bind:value={port} type="number" placeholder="port" class="narrow" />
@@ -483,6 +564,13 @@
           <button onclick={doConnect} disabled={connecting}>
             {connecting ? '连接中…' : '连接'}
           </button>
+        </div>
+        <div class="conn-extra">
+          <input bind:value={connName} placeholder="连接名（保存后一键连接）" />
+          <label class="save-label">
+            <input type="checkbox" bind:checked={saveConn} />
+            保存此连接（密码入 macOS 钥匙串）
+          </label>
         </div>
       </div>
     {/if}
@@ -917,7 +1005,87 @@
   .conn-form {
     display: flex;
     gap: 6px;
-    max-width: 720px;
+    max-width: 780px;
+  }
+
+  .conn-extra {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+    max-width: 780px;
+  }
+
+  .conn-extra input:not([type]) {
+    flex: 1;
+  }
+
+  .save-label {
+    color: #8b93a3;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+
+  .saved-list {
+    margin-bottom: 10px;
+    max-width: 780px;
+  }
+
+  .saved-title {
+    font-size: 11px;
+    color: #6b7484;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+
+  .saved-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+
+  .saved-connect {
+    flex: 1;
+    text-align: left;
+    background: #262a33;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #d7dae0;
+    padding: 6px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .saved-connect:hover:not(:disabled) {
+    border-color: #4fc3f7;
+    background: #2a2f3a;
+  }
+
+  .saved-connect small {
+    color: #6b7484;
+    font-size: 11px;
+  }
+
+  .saved-del {
+    background: transparent;
+    border: 1px solid #363b47;
+    border-radius: 6px;
+    color: #8b93a3;
+    padding: 5px 10px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .saved-del:hover {
+    border-color: #d64545;
+    color: #e05656;
   }
 
   input {

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, Row};
@@ -541,6 +541,200 @@ async fn paginate_table(
     res
 }
 
+// ================= 连接管理（配置 JSON + Keychain 密码） =================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SavedConn {
+    name: String,
+    host: String,
+    port: u16,
+    user: String,
+    dbname: String,
+}
+
+/// 配置文件路径（测试可用 TUSK_CONNS_DIR 注入目录）
+fn conns_file_path() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("TUSK_CONNS_DIR") {
+        return std::path::PathBuf::from(dir).join("connections.json");
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home)
+        .join("Library/Application Support/com.tusk.app")
+        .join("connections.json")
+}
+
+fn load_conns() -> Vec<SavedConn> {
+    let path = conns_file_path();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn save_conns(conns: &[SavedConn]) -> Result<(), String> {
+    let path = conns_file_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(conns).map_err(|e| format!("序列化失败: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("写入配置失败: {e}"))
+}
+
+/// Keychain：写入密码（service=tusk, account=连接名）
+fn keychain_set(account: &str, password: &str) -> Result<(), String> {
+    let out = std::process::Command::new("security")
+        .args(["add-generic-password", "-U", "-a", "tusk", "-s", account, "-w", password])
+        .output()
+        .map_err(|e| format!("调用 security 失败: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Keychain 写入失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
+/// Keychain：读取密码（无记录返回 None）
+fn keychain_get(account: &str) -> Result<Option<String>, String> {
+    let out = std::process::Command::new("security")
+        .args(["find-generic-password", "-a", "tusk", "-s", account, "-w"])
+        .output()
+        .map_err(|e| format!("调用 security 失败: {e}"))?;
+    if out.status.success() {
+        Ok(Some(
+            String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string(),
+        ))
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("could not be found") || err.contains("could not be found in keychain") {
+            Ok(None)
+        } else {
+            Err(format!("Keychain 读取失败: {err}"))
+        }
+    }
+}
+
+/// Keychain：删除密码（不存在时静默成功）
+fn keychain_delete(account: &str) -> Result<(), String> {
+    let out = std::process::Command::new("security")
+        .args(["delete-generic-password", "-a", "tusk", "-s", account])
+        .output()
+        .map_err(|e| format!("调用 security 失败: {e}"))?;
+    Ok(())
+}
+
+/// 核心：保存连接（同名覆盖）。password 为 Some 时写入 Keychain
+async fn save_connection_core(conn: &SavedConn, password: Option<&str>) -> Result<(), String> {
+    let mut conns = load_conns();
+    if let Some(existing) = conns.iter_mut().find(|c| c.name == conn.name) {
+        *existing = conn.clone();
+    } else {
+        conns.push(conn.clone());
+    }
+    save_conns(&conns)?;
+    if let Some(pw) = password {
+        keychain_set(&conn.name, pw)?;
+    }
+    Ok(())
+}
+
+/// 核心：列出已保存连接
+async fn list_connections_core() -> Result<Vec<SavedConn>, String> {
+    Ok(load_conns())
+}
+
+/// 核心：删除连接（配置 + Keychain 密码）
+async fn delete_connection_core(name: &str) -> Result<(), String> {
+    let mut conns = load_conns();
+    conns.retain(|c| c.name != name);
+    save_conns(&conns)?;
+    let _ = keychain_delete(name);
+    Ok(())
+}
+
+/// 核心：按名称取出连接配置（含 Keychain 密码）
+async fn connect_saved_core(name: &str) -> Result<(ConnConfig, String), String> {
+    let conns = load_conns();
+    let conn = conns
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| format!("连接「{name}」不存在"))?;
+    let password = keychain_get(name)?.unwrap_or_default();
+    Ok((
+        ConnConfig {
+            host: conn.host.clone(),
+            port: conn.port,
+            user: conn.user.clone(),
+            password: password.clone(),
+            dbname: conn.dbname.clone(),
+        },
+        password,
+    ))
+}
+
+/// 保存连接（Tauri command 入口）
+#[tauri::command]
+async fn save_connection(
+    name: String,
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+    dbname: String,
+) -> Result<(), String> {
+    let conn = SavedConn {
+        name,
+        host,
+        port,
+        user,
+        dbname,
+    };
+    let pw = if password.trim().is_empty() {
+        None
+    } else {
+        Some(password)
+    };
+    save_connection_core(&conn, pw.as_deref()).await
+}
+
+/// 列出已保存连接（Tauri command 入口）
+#[tauri::command]
+async fn list_connections() -> Result<Vec<SavedConn>, String> {
+    list_connections_core().await
+}
+
+/// 删除连接（Tauri command 入口）
+#[tauri::command]
+async fn delete_connection(name: String) -> Result<(), String> {
+    delete_connection_core(&name).await
+}
+
+/// 按名称连接（Tauri command 入口，含 Keychain 取密码）
+#[tauri::command]
+async fn connect_saved(state: State<'_, AppState>, name: String) -> Result<ConnectionInfo, String> {
+    let (cfg, _pw) = connect_saved_core(&name).await?;
+    let (client, version) = open_connection(&cfg).await?;
+    let id = format!(
+        "conn-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    state.conns.lock().await.insert(
+        id.clone(),
+        ConnEntry {
+            client,
+            cfg,
+        },
+    );
+    Ok(ConnectionInfo { id, version })
+}
+
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
 /// 这里自定义解码（PostgreSQL wire format，精度无损）
 struct NumericString(String);
@@ -893,6 +1087,54 @@ mod tests {
         assert_eq!(multi2.results[0].rows_affected, Some(1));
         assert!(multi2.results[1].rows[0][0].is_number());
     }
+
+    #[tokio::test]
+    async fn test_connection_store() {
+        // 用临时目录隔离配置，避免污染真实配置
+        let dir = std::env::temp_dir().join(format!("tusk-conn-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建临时目录失败");
+        std::env::set_var("TUSK_CONNS_DIR", &dir);
+
+        let conn = SavedConn {
+            name: "本地测试库".into(),
+            host: "localhost".into(),
+            port: 5432,
+            user: whoami().into(),
+            dbname: "tusk_demo".into(),
+        };
+
+        // 保存 → 列表
+        save_connection_core(&conn, None).await.expect("保存失败");
+        let list = list_connections_core().await.expect("列表失败");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "本地测试库");
+
+        // 同名更新
+        let mut conn2 = conn.clone();
+        conn2.dbname = "postgres".into();
+        save_connection_core(&conn2, None).await.expect("更新失败");
+        let list = list_connections_core().await.expect("列表失败");
+        assert_eq!(list.len(), 1, "同名应覆盖而非追加");
+        assert_eq!(list[0].dbname, "postgres");
+
+        // 从保存的连接取配置并真正连接（本地 trust 无密码）
+        let (cfg, _pw) = connect_saved_core("本地测试库").await.expect("取配置失败");
+        assert_eq!(cfg.dbname, "postgres");
+        let (client, _) = open_connection(&cfg).await.expect("用保存的配置连接失败");
+        let one: i32 = client
+            .query_one("SELECT 1", &[])
+            .await
+            .expect("查询失败")
+            .get(0);
+        assert_eq!(one, 1);
+
+        // 删除 → 列表空
+        delete_connection_core("本地测试库").await.expect("删除失败");
+        assert!(list_connections_core().await.expect("列表失败").is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::env::remove_var("TUSK_CONNS_DIR");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -909,7 +1151,11 @@ pub fn run() {
             list_databases,
             list_tables,
             list_columns,
-            paginate_table
+            paginate_table,
+            save_connection,
+            list_connections,
+            delete_connection,
+            connect_saved
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
