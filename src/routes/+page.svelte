@@ -1,5 +1,31 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+
+  // ===== 窗口大小记忆：启动恢复、resize 防抖保存 =====
+  try {
+    const saved = localStorage.getItem('tusk.winSize');
+    if (saved) {
+      const [w, h] = JSON.parse(saved);
+      if (w > 400 && h > 300) {
+        getCurrentWindow().setSize(new LogicalSize(w, h));
+      }
+    }
+  } catch {
+    // 恢复失败忽略
+  }
+  let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(async () => {
+      try {
+        const size = await getCurrentWindow().innerSize();
+        localStorage.setItem('tusk.winSize', JSON.stringify([size.width, size.height]));
+      } catch {
+        // 保存失败忽略
+      }
+    }, 500);
+  });
 
   // ================= 连接配置 =================
   let host = $state('localhost');
