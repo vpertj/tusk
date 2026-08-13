@@ -1179,7 +1179,7 @@
     font-size: 12px;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 3px;
     white-space: nowrap;
     cursor: pointer;
   }
