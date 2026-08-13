@@ -101,6 +101,129 @@
     is_pk: boolean;
   }
   let dbs = $state<DatabaseInfo[]>([]);
+
+  // ===== 表设计器（建表） =====
+  const DESIGNER_TYPES = [
+    'serial',
+    'bigserial',
+    'int4',
+    'int8',
+    'text',
+    'varchar',
+    'numeric',
+    'float8',
+    'bool',
+    'date',
+    'timestamp',
+    'timestamptz',
+    'time',
+    'jsonb',
+    'uuid',
+    'bytea',
+  ];
+  let showDesigner = $state(false);
+  let designerDb = $state('');
+  let designerName = $state('');
+  let designerError = $state('');
+  let designerSeq = 0;
+  interface DesignerCol {
+    id: number;
+    name: string;
+    baseType: string;
+    length: string;
+    nullable: boolean;
+    default: string;
+    isPk: boolean;
+    isSerial: boolean;
+  }
+  let designerCols = $state<DesignerCol[]>([
+    { id: 1, name: 'id', baseType: 'serial', length: '', nullable: false, default: '', isPk: true, isSerial: true },
+    { id: 2, name: 'name', baseType: 'text', length: '', nullable: false, default: '', isPk: false, isSerial: false },
+  ]);
+
+  function openDesigner() {
+    designerDb = dbs[0]?.name ?? dbname;
+    designerName = '';
+    designerError = '';
+    designerCols = [
+      { id: ++designerSeq, name: 'id', baseType: 'serial', length: '', nullable: false, default: '', isPk: true, isSerial: true },
+      { id: ++designerSeq, name: 'name', baseType: 'text', length: '', nullable: false, default: '', isPk: false, isSerial: false },
+    ];
+    showDesigner = true;
+  }
+
+  function addDesignerCol() {
+    designerCols = [
+      ...designerCols,
+      { id: ++designerSeq, name: '', baseType: 'text', length: '', nullable: true, default: '', isPk: false, isSerial: false },
+    ];
+  }
+
+  function delDesignerCol(id: number) {
+    if (designerCols.length <= 1) return;
+    designerCols = designerCols.filter((c) => c.id !== id);
+  }
+
+  function buildColType(c: DesignerCol): string {
+    if (c.baseType === 'varchar') return c.length.trim() ? `varchar(${c.length.trim()})` : 'varchar';
+    if (c.baseType === 'numeric') return c.length.trim() ? `numeric(${c.length.trim()})` : 'numeric';
+    return c.baseType;
+  }
+
+  async function doCreateTable() {
+    if (!connId || !designerName.trim()) {
+      designerError = '请填写表名';
+      return;
+    }
+    const columns = designerCols.map((c) => ({
+      name: c.name.trim(),
+      col_type: buildColType(c),
+      nullable: c.nullable,
+      default: c.default.trim() === '' ? null : c.default.trim(),
+      is_pk: c.isPk,
+      is_serial: c.isSerial || c.baseType === 'serial' || c.baseType === 'bigserial',
+    }));
+    if (columns.some((c) => !c.name)) {
+      designerError = '字段名不能为空';
+      return;
+    }
+    try {
+      await invoke('create_table', {
+        connId,
+        dbname: designerDb,
+        table: designerName.trim(),
+        columns,
+      });
+      showDesigner = false;
+      await refreshTables(designerDb);
+      openTableTab(designerDb, designerName.trim());
+    } catch (e) {
+      designerError = String(e);
+    }
+  }
+
+  // 刷新库的表列表（保持展开状态）
+  async function refreshTables(db: string) {
+    if (!connId) return;
+    try {
+      tables[db] = await invoke<TableInfo[]>('list_tables', { connId, dbname: db });
+    } catch (e) {
+      status = `刷新表失败: ${e}`;
+    }
+  }
+
+  // 删除表（表页签工具栏）
+  async function dropTable(raw: QueryTab) {
+    const t = resolveTab(raw);
+    if (!confirm(`确定删除表「${t.table}」？表中数据将全部丢失，此操作不可撤销！`)) return;
+    try {
+      await invoke('drop_table', { connId, dbname: t.dbname, table: t.table });
+      closeTab(t.id);
+      if (t.dbname) await refreshTables(t.dbname);
+    } catch (e) {
+      t.error = String(e);
+    }
+  }
   let treeOpen = $state<Record<string, boolean>>({}); // key: db / db.table
   let tables = $state<Record<string, TableInfo[]>>({});
   let columns = $state<Record<string, SchemaColumn[]>>({});
@@ -674,6 +797,7 @@
     <div class="logo">🐘 Tusk</div>
     <div class="toolbar">
       <button onclick={openNewTab} disabled={!connId} title="新建查询 (Cmd+N)">＋ 新建查询</button>
+      <button onclick={openDesigner} disabled={!connId} title="新建表（表设计器）">＋ 新建表</button>
       <button onclick={loadDbs} disabled={!connId} title="刷新对象树">⟳ 刷新</button>
       {#if connId}
         <button onclick={doDisconnect} class="danger">断开</button>
@@ -1026,6 +1150,13 @@
                 <button onclick={() => exportTable(activeTab)} disabled={activeTab.loading}>
                   ⬇ 导出 CSV
                 </button>
+                <button
+                  class="danger"
+                  onclick={() => dropTable(activeTab)}
+                  disabled={activeTab.loading}
+                  title="删除整张表（不可恢复）"
+                  >🗑 删除表</button
+                >
                 <button onclick={() => loadTablePage(activeTab)} disabled={activeTab.loading}>
                   ⟳ 刷新
                 </button>
@@ -1151,6 +1282,100 @@
       {/if}
     </section>
   </main>
+
+  <!-- ============ 表设计器（新建表） ============ -->
+  {#if showDesigner && connId}
+    <div class="overlay" role="presentation" onclick={() => (showDesigner = false)}>
+      <div
+        class="conn-dialog designer-dialog"
+        role="dialog"
+        aria-label="新建表"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (showDesigner = false)}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">📋 新建表</span>
+          <button class="dialog-close" onclick={() => (showDesigner = false)}>×</button>
+        </div>
+        <div class="dialog-body">
+          {#if designerError}
+            <div class="error">⚠ {designerError}</div>
+          {/if}
+          <div class="field">
+            <label for="d-tname">表名</label>
+            <input id="d-tname" bind:value={designerName} placeholder="表名" />
+          </div>
+          <div class="field">
+            <label for="d-db">数据库</label>
+            <select id="d-db" bind:value={designerDb}>
+              {#each dbs as db}
+                <option value={db.name}>{db.name}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="saved-title" style="margin-top:12px">字段定义</div>
+          <div class="designer-grid">
+            <div class="dg-head">
+              <span class="dg-pk">主键</span>
+              <span class="dg-serial">自增</span>
+              <span class="dg-name">字段名</span>
+              <span class="dg-type">类型</span>
+              <span class="dg-len">长度/精度</span>
+              <span class="dg-null">可空</span>
+              <span class="dg-def">默认值</span>
+              <span class="dg-del"></span>
+            </div>
+            {#each designerCols as c}
+              <div class="dg-row">
+                <span class="dg-pk">
+                  <input
+                    type="radio"
+                    name="dg-pk"
+                    checked={c.isPk}
+                    onclick={() => designerCols.forEach((x) => (x.isPk = x.id === c.id))}
+                  />
+                </span>
+                <span class="dg-serial">
+                  <input type="checkbox" bind:checked={c.isSerial} />
+                </span>
+                <span class="dg-name">
+                  <input bind:value={c.name} placeholder="字段名" />
+                </span>
+                <span class="dg-type">
+                  <select bind:value={c.baseType}>
+                    {#each DESIGNER_TYPES as t}
+                      <option value={t}>{t}</option>
+                    {/each}
+                  </select>
+                </span>
+                <span class="dg-len">
+                  <input
+                    bind:value={c.length}
+                    placeholder={c.baseType === 'numeric' ? '10,2' : '255'}
+                  />
+                </span>
+                <span class="dg-null">
+                  <input type="checkbox" bind:checked={c.nullable} />
+                </span>
+                <span class="dg-def">
+                  <input bind:value={c.default} placeholder="now() / 0 / 'x'" />
+                </span>
+                <span class="dg-del">
+                  <button onclick={() => delDesignerCol(c.id)}>×</button>
+                </span>
+              </div>
+            {/each}
+          </div>
+          <button onclick={addDesignerCol} class="add-col">＋ 添加字段</button>
+          <div class="field-actions" style="margin-top:16px">
+            <button onclick={() => (showDesigner = false)}>取消</button>
+            <button onclick={doCreateTable} class="primary">创建表</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <!-- ============ 底部状态栏 ============ -->
   <footer>
@@ -1697,6 +1922,130 @@
     word-break: break-all;
   }
 
+  /* ===== 表设计器 ===== */
+  .designer-dialog {
+    width: 860px;
+  }
+
+  .designer-grid {
+    border: 1px solid #2c303a;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .dg-head,
+  .dg-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+  }
+
+  .dg-head {
+    background: #242833;
+    color: #8b93a3;
+    font-size: 11px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  .dg-row {
+    border-top: 1px solid #2c303a;
+    background: #1b1e25;
+  }
+
+  .dg-row:hover {
+    background: #20242e;
+  }
+
+  .dg-pk {
+    width: 46px;
+    flex-shrink: 0;
+    text-align: center;
+  }
+
+  .dg-serial {
+    width: 44px;
+    flex-shrink: 0;
+    text-align: center;
+  }
+
+  .dg-name {
+    flex: 1.3;
+    min-width: 90px;
+  }
+
+  .dg-type {
+    flex: 1;
+    min-width: 90px;
+  }
+
+  .dg-len {
+    flex: 0.8;
+    min-width: 70px;
+  }
+
+  .dg-null {
+    width: 42px;
+    flex-shrink: 0;
+    text-align: center;
+  }
+
+  .dg-def {
+    flex: 1.1;
+    min-width: 80px;
+  }
+
+  .dg-del {
+    width: 28px;
+    flex-shrink: 0;
+    text-align: center;
+  }
+
+  .dg-row input:not([type]) {
+    width: 100%;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
+  .dg-row select {
+    width: 100%;
+    padding: 4px 6px;
+    font-size: 12px;
+  }
+
+  .dg-del button {
+    background: transparent;
+    border: none;
+    color: #8b93a3;
+    font-size: 15px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+  }
+
+  .dg-del button:hover {
+    color: #e05656;
+  }
+
+  .add-col {
+    margin-top: 8px;
+    background: #262a33;
+    border: 1px dashed #4a5264;
+    border-radius: 6px;
+    color: #aab2c0;
+    padding: 5px 14px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .add-col:hover {
+    border-color: #4fc3f7;
+    color: #d7dae0;
+  }
+
+  /* ===== 表设计器 ===== */
+
   /* 数据页工具栏 */
   .data-toolbar {
     display: flex;
@@ -1725,6 +2074,16 @@
   .data-toolbar button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  .data-toolbar button.danger {
+    border-color: #7a2e2e;
+    color: #e05656;
+  }
+
+  .data-toolbar button.danger:hover:not(:disabled) {
+    border-color: #d64545;
+    background: #3a2020;
   }
 
   .toolbar-hint {

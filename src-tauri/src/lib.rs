@@ -1048,6 +1048,126 @@ async fn explain_query(
     explain_query_core(&entry.client, &sql).await
 }
 
+
+// ================= 表结构管理（DDL） =================
+
+#[derive(Deserialize, Debug, Clone)]
+struct ColumnDef {
+    name: String,
+    col_type: String,
+    nullable: bool,
+    default: Option<String>,
+    is_pk: bool,
+    is_serial: bool,
+}
+
+/// 核心：CREATE TABLE（Navicat 表设计器语义：字段网格 → DDL）
+async fn create_table_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    table: &str,
+    columns: Vec<ColumnDef>,
+) -> Result<(), String> {
+    if table.trim().is_empty() {
+        return Err("表名不能为空".into());
+    }
+    if columns.is_empty() {
+        return Err("至少需要一个字段".into());
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut pk_cols: Vec<String> = Vec::new();
+    for c in &columns {
+        if c.name.trim().is_empty() {
+            return Err("字段名不能为空".into());
+        }
+        if c.col_type.trim().is_empty() {
+            return Err(format!("字段「{}」未选择类型", c.name));
+        }
+        let mut def = format!("{} {}", quote_ident(&c.name), c.col_type.trim());
+        if c.is_pk {
+            pk_cols.push(c.name.clone());
+        }
+        // serial 主键隐含 NOT NULL，无需重复
+        if !c.nullable && !c.is_serial {
+            def.push_str(" NOT NULL");
+        }
+        if let Some(d) = &c.default {
+            let d = d.trim();
+            if !d.is_empty() {
+                def.push_str(&format!(" DEFAULT {d}"));
+            }
+        }
+        parts.push(def);
+    }
+    if !pk_cols.is_empty() {
+        let pks: Vec<String> = pk_cols.iter().map(|p| quote_ident(p)).collect();
+        parts.push(format!("PRIMARY KEY ({})", pks.join(", ")));
+    }
+    let sql = format!("CREATE TABLE {} ({})", quote_ident(table), parts.join(", "));
+
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    client
+        .execute(&sql, &[])
+        .await
+        .map_err(|e| {
+            let mut msg = format!("建表失败: {e}");
+            let mut src = std::error::Error::source(&e);
+            while let Some(s) = src {
+                msg.push_str(&format!(" <- {s}"));
+                src = s.source();
+            }
+            eprintln!("[tusk-ddl] SQL: {sql}");
+            msg
+        })?;
+    Ok(())
+}
+
+/// 核心：DROP TABLE
+async fn drop_table_core(cfg: &ConnConfig, dbname: &str, table: &str) -> Result<(), String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    let sql = format!("DROP TABLE {}", quote_ident(table));
+    client
+        .execute(&sql, &[])
+        .await
+        .map_err(|e| format!("删除失败: {e}"))?;
+    Ok(())
+}
+
+/// 建表（Tauri command 入口）
+#[tauri::command]
+async fn create_table(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+    columns: Vec<ColumnDef>,
+) -> Result<(), String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    create_table_core(&cfg, &dbname, &table, columns).await
+}
+
+/// 删表（Tauri command 入口）
+#[tauri::command]
+async fn drop_table(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+) -> Result<(), String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    drop_table_core(&cfg, &dbname, &table).await
+}
+
 /// numeric 列的字符串包装：postgres-types 未实现 numeric 的 FromSql，
 /// 这里自定义解码（PostgreSQL wire format，精度无损）
 struct NumericString(String);
@@ -1625,6 +1745,152 @@ mod tests {
             .expect_err("应拒绝非 SELECT");
         assert!(err.contains("SELECT"), "错误信息应说明仅支持 SELECT: {err}");
     }
+
+    #[tokio::test]
+    async fn test_create_table() {
+        let cfg = test_cfg();
+        let tname = format!("tusk_ddl_test_{}", std::process::id());
+
+        // 空字段拒绝
+        let err = create_table_core(&cfg, "tusk_demo", "empty_table", vec![])
+            .await
+            .expect_err("空字段应拒绝");
+        assert!(err.contains("至少"), "错误提示: {err}");
+
+        // 标准建表：serial 主键 + varchar + numeric + 默认值
+        let cols = vec![
+            ColumnDef {
+                name: "id".into(),
+                col_type: "serial".into(),
+                nullable: false,
+                default: None,
+                is_pk: true,
+                is_serial: true,
+            },
+            ColumnDef {
+                name: "name".into(),
+                col_type: "varchar(100)".into(),
+                nullable: false,
+                default: None,
+                is_pk: false,
+                is_serial: false,
+            },
+            ColumnDef {
+                name: "price".into(),
+                col_type: "numeric(10,2)".into(),
+                nullable: true,
+                default: Some("0".into()),
+                is_pk: false,
+                is_serial: false,
+            },
+            ColumnDef {
+                name: "created_at".into(),
+                col_type: "timestamptz".into(),
+                nullable: true,
+                default: Some("now()".into()),
+                is_pk: false,
+                is_serial: false,
+            },
+        ];
+        create_table_core(&cfg, "tusk_demo", &tname, cols)
+            .await
+            .expect("建表失败");
+
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        // 4 个字段
+        let cnt: i64 = client
+            .query_one(
+                "SELECT count(*) FROM information_schema.columns WHERE table_name = $1",
+                &[&tname],
+            )
+            .await
+            .expect("查字段失败")
+            .get(0);
+        assert_eq!(cnt, 4, "应有 4 个字段");
+        // 主键存在
+        let pk: i64 = client
+            .query_one(
+                "SELECT count(*) FROM information_schema.table_constraints                  WHERE table_name = $1 AND constraint_type = 'PRIMARY KEY'",
+                &[&tname],
+            )
+            .await
+            .expect("查主键失败")
+            .get(0);
+        assert_eq!(pk, 1, "应有主键约束");
+        // 自增 + 默认值可插入
+        client
+            .execute(&format!("INSERT INTO \"{tname}\" (name) VALUES ('hello')"), &[])
+            .await
+            .expect("插入失败");
+        let n: i64 = client
+            .query_one(&format!("SELECT count(*) FROM \"{tname}\""), &[])
+            .await
+            .expect("查数失败")
+            .get(0);
+        assert_eq!(n, 1, "应能插入 1 行");
+        // 重名建表报错
+        let err2 = create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![ColumnDef {
+                name: "id".into(),
+                col_type: "serial".into(),
+                nullable: false,
+                default: None,
+                is_pk: true,
+                is_serial: true,
+            }],
+        )
+        .await
+        .expect_err("重名应报错");
+        assert!(err2.contains("已存在") || err2.to_lowercase().contains("exist"), "错误: {err2}");
+        // 清理
+        client
+            .execute(&format!("DROP TABLE \"{tname}\""), &[])
+            .await
+            .expect("清理失败");
+    }
+
+    #[tokio::test]
+    async fn test_drop_table() {
+        let cfg = test_cfg();
+        let tname = format!("tusk_drop_test_{}", std::process::id());
+        // 建表后删除
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![ColumnDef {
+                name: "id".into(),
+                col_type: "serial".into(),
+                nullable: false,
+                default: None,
+                is_pk: true,
+                is_serial: true,
+            }],
+        )
+        .await
+        .expect("建表失败");
+        drop_table_core(&cfg, "tusk_demo", &tname)
+            .await
+            .expect("删表失败");
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        let exists: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+                &[&tname],
+            )
+            .await
+            .expect("查表失败")
+            .get(0);
+        assert!(!exists, "表应已删除");
+        // 删除不存在的表报错
+        let err = drop_table_core(&cfg, "tusk_demo", "no_such_table_xyz")
+            .await
+            .expect_err("删除不存在表应报错");
+        assert!(!err.is_empty());
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1650,7 +1916,9 @@ pub fn run() {
             delete_row,
             insert_row,
             export_csv,
-            explain_query
+            explain_query,
+            create_table,
+            drop_table
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
