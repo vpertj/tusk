@@ -158,7 +158,7 @@
 
   function openDesigner() {
     editingTable = null;
-    designerDb = activeDb || dbs[0]?.name ?? dbname;
+    designerDb = activeDb || (dbs[0]?.name ?? dbname);
     designerName = '';
     designerError = '';
     designerCols = [
@@ -541,7 +541,7 @@
   let viewDialog = $state<{ db: string; name: string; sql: string; err: string } | null>(null);
 
   function openViewDialog() {
-    viewDialog = { db: activeDb || dbs[0]?.name ?? dbname, name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
+    viewDialog = { db: activeDb || (dbs[0]?.name ?? dbname), name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
     showViewDialog = true;
   }
 
