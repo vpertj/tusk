@@ -1450,7 +1450,6 @@
       </div>
       <div class="spacer"></div>
       <div class="grp">
-        <span class="conn-dot" class:ok={!!connId} title={connId ? '已连接' : '未连接'}></span>
         {#if connId}
           <button onclick={doDisconnect} class="danger" title="断开连接">断开</button>
         {:else}
@@ -2812,21 +2811,6 @@
     width: 30px;
     height: 30px;
     padding: 0;
-  }
-
-  /* 连接状态指示 */
-  .conn-dot {
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #5c6472;
-    flex-shrink: 0;
-    line-height: 0;
-  }
-
-  .conn-dot.ok {
-    background: #4caf50;
   }
 
   /* 工具栏按钮自定义 tooltip（WKWebView 不显示 title） */
