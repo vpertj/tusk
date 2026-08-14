@@ -1384,7 +1384,7 @@
     </div>
     <div class="toolbar">
       <div class="grp">
-        <button onclick={openNewTab} disabled={!connId} data-tip="新建查询 (⌘N)">
+        <button onclick={openNewTab} disabled={!connId} data-tip="新建查询 (⌘N)" aria-label="新建查询">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
             <polyline points="14 2 14 8 20 8" />
@@ -1402,7 +1402,7 @@
         <button
           onclick={() => document.getElementById('sql-file-input')?.click()}
           disabled={!connId}
-          data-tip="打开 .sql 文件"
+          data-tip="打开 .sql 文件" aria-label="打开 SQL 文件"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
@@ -1411,7 +1411,7 @@
       </div>
       <div class="sep"></div>
       <div class="grp">
-        <button onclick={openDesigner} disabled={!connId} data-tip="新建表">
+        <button onclick={openDesigner} disabled={!connId} data-tip="新建表" aria-label="新建表">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="3" width="7" height="7" />
             <rect x="14" y="3" width="7" height="7" />
@@ -1419,13 +1419,13 @@
             <rect x="3" y="14" width="7" height="7" />
           </svg>
         </button>
-        <button onclick={openViewDialog} disabled={!connId} data-tip="新建视图">
+        <button onclick={openViewDialog} disabled={!connId} data-tip="新建视图" aria-label="新建视图">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
             <circle cx="12" cy="12" r="3" />
           </svg>
         </button>
-        <button onclick={openSyncDialog} disabled={!connId} data-tip="结构同步">
+        <button onclick={openSyncDialog} disabled={!connId} data-tip="结构同步" aria-label="结构同步">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="23 4 23 10 17 10" />
             <polyline points="1 20 1 14 7 14" />
@@ -1435,13 +1435,13 @@
       </div>
       <div class="sep"></div>
       <div class="grp">
-        <button onclick={loadDbs} disabled={!connId} data-tip="刷新对象树">
+        <button onclick={loadDbs} disabled={!connId} data-tip="刷新对象树" aria-label="刷新对象树">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="23 4 23 10 17 10" />
             <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
           </svg>
         </button>
-        <button onclick={() => { searchOpen = true; }} disabled={!connId} data-tip="搜索对象 (⌘F)">
+        <button onclick={() => { searchOpen = true; }} disabled={!connId} data-tip="搜索对象 (⌘F)" aria-label="搜索对象">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8" />
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
@@ -1457,7 +1457,7 @@
         {:else}
           <button onclick={() => (showConnPanel = !showConnPanel)} class="primary" title="连接数据库">连接</button>
         {/if}
-        <button onclick={openSettings} class="icon-btn" data-tip="设置">
+        <button onclick={openSettings} class="icon-btn" data-tip="设置" aria-label="设置">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3" />
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
