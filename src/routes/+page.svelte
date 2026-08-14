@@ -1622,12 +1622,13 @@
         </button>
       </div>
       <div class="spacer"></div>
-    </div>
-    <div class="status" class:ok={!!connId} class:err={status.startsWith('连接失败') || status.startsWith('加载')}>
-      {status}
-      {#if version}
-        <span class="ver">{version.slice(0, 40)}</span>
-      {/if}
+      <div class="grp">
+        {#if connId}
+          <button onclick={doDisconnect} class="danger" title="断开连接">断开</button>
+        {:else}
+          <button onclick={() => (showConnPanel = !showConnPanel)} class="primary" title="连接数据库">连接</button>
+        {/if}
+      </div>
     </div>
   </header>
 
@@ -2996,18 +2997,13 @@
     {#if connId}
       <span class="conn-info">
         <span class="conn-ok">已连接</span>
-        · {connMeta.user}@{connMeta.host}:{connMeta.port} {connMeta.version}
+        · {connMeta.user}@{connMeta.host}:{connMeta.port} {connMeta.version.replace(/ on .*$/, '')}
       </span>
     {:else}
       <span>未连接</span>
     {/if}
     <span class="spacer"></span>
     <span>Tusk v{APP_VERSION}</span>
-    {#if connId}
-      <button onclick={doDisconnect} class="danger footer-disconnect" title="断开连接">断开</button>
-    {:else}
-      <button onclick={() => (showConnPanel = !showConnPanel)} class="primary footer-disconnect" title="连接数据库">连接</button>
-    {/if}
   </footer>
 </div>
 
@@ -3150,6 +3146,15 @@
   .toolbar button:hover:not(:disabled) {
     background: #262b36;
     color: #f0f2f5;
+  }
+
+  .toolbar button.primary,
+  .toolbar button.danger {
+    width: auto;
+    padding: 5px 14px;
+    display: inline-flex;
+    align-items: center;
+    font-size: 12px;
   }
 
   .toolbar button svg {
