@@ -2083,7 +2083,6 @@
             <input
               bind:value={searchQuery}
               placeholder="输入表名 / 视图名 / 数据库名…"
-              autofocus
             />
           </div>
           <div class="search-list">
@@ -2095,7 +2094,6 @@
               {#each searchResults() as r (r.db + '.' + r.table)}
                 <button
                   class="search-item"
-                  role="button"
                   onclick={() => openSearchResult(r)}
                   title={`打开 ${r.db}.${r.table}`}
                 >
