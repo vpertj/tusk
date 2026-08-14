@@ -51,8 +51,121 @@
     } catch {
       savedConns = [];
     }
+    syncConnNodes();
   }
-  loadSavedConns();
+
+  /** 用 savedConns + 当前连接重建连接树节点（保活已连接节点的状态） */
+  function syncConnNodes() {
+    const next: { id: string; name: string; host: string; port: number; connected: boolean; expanded: boolean }[] = [];
+    for (const sc of savedConns) {
+      const exist = connNodes.find((n) => n.name === sc.name);
+      next.push({
+        id: exist?.id ?? '',
+        name: sc.name,
+        host: sc.host,
+        port: sc.port,
+        connected: !!exist?.connected,
+        expanded: exist?.expanded ?? false,
+      });
+    }
+    // 当前活动连接若不在保存列表（手动连接），也挂一个节点
+    if (connId && !next.some((n) => n.id === connId)) {
+      next.push({
+        id: connId,
+        name: connMeta.user ? `${connMeta.user}@${connMeta.host}:${connMeta.port}` : '当前连接',
+        host: connMeta.host,
+        port: connMeta.port,
+        connected: true,
+        expanded: true,
+      });
+    }
+    connNodes = next;
+  }
+
+  /** 连接树行点击：未连→连接；已连→展开/收起并聚焦 */
+  async function connRowClick(c: { id: string; name: string }) {
+    if (!c.id) {
+      await connectByName(c.name);
+      return;
+    }
+    connId = c.id;
+    const node = connNodes.find((n) => n.id === c.id);
+    if (node) node.expanded = !node.expanded;
+    if (!connDbs[c.id]) {
+      await loadDbsFor(c.id);
+    }
+  }
+
+  /** 按保存连接名一键连接并挂入连接树 */
+  async function connectByName(name: string): Promise<string> {
+    try {
+      const info = await invoke<{ id: string; version: string; user: string; host: string; port: number }>(
+        'connect_saved',
+        { name },
+      );
+      connId = info.id;
+      version = info.version;
+      connMeta = { user: info.user, host: info.host, port: info.port, version: info.version };
+      status = `已连接 · ${info.user}@${info.host}:${info.port}`;
+      const node = connNodes.find((n) => n.name === name);
+      if (node) {
+        node.id = info.id;
+        node.connected = true;
+        node.expanded = true;
+      } else {
+        syncConnNodes();
+      }
+      await loadDbsFor(info.id);
+      return info.id;
+    } catch (e) {
+      status = `连接失败: ${e}`;
+      throw e;
+    }
+  }
+
+  /** 加载指定连接的库列表 */
+  async function loadDbsFor(conn: string) {
+    try {
+      connDbs[conn] = await invoke<DatabaseInfo[]>('list_databases', { connId: conn });
+    } catch (e) {
+      status = `加载数据库失败: ${e}`;
+    }
+  }
+
+  /** 断开连接：节点置灰 + 清缓存 + 关闭其页签 */
+  async function disconnectConn(conn: string) {
+    try {
+      await invoke('disconnect', { connId: conn });
+    } catch {
+      /* 忽略 */
+    }
+    const node = connNodes.find((n) => n.id === conn);
+    if (node) {
+      node.connected = false;
+      node.expanded = false;
+      node.id = '';
+    }
+    delete connDbs[conn];
+    for (const k of Object.keys(tables)) if (k.startsWith(conn + '::')) delete tables[k];
+    for (const k of Object.keys(treeOpen)) if (k.startsWith(conn + '::')) delete treeOpen[k];
+    for (const k of Object.keys(columns)) if (k.startsWith(conn + '::')) delete columns[k];
+    // 关闭属于该连接的页签
+    for (const t of tabs.filter((x) => x.connId === conn)) closeTab(t.id);
+    if (connId === conn) {
+      connId = '';
+      connMeta = { user: '', host: '', port: 0, version: '' };
+      status = '已断开连接';
+    }
+  }
+
+  /** 连接右键菜单 */
+  let connMenu = $state<{ x: number; y: number; name: string; id: string; connected: boolean } | null>(null);
+
+  function openConnMenu(e: MouseEvent, c: { id: string; name: string; connected: boolean }) {
+    e.preventDefault();
+    e.stopPropagation();
+    connMenu = { x: e.clientX, y: e.clientY, name: c.name, id: c.id, connected: c.connected };
+  }
 
   // ================= 连接状态 =================
   let connId = $state('');
@@ -140,7 +253,7 @@
     'bytea',
   ];
   let showDesigner = $state(false);
-  let editingTable = $state<{ db: string; table: string } | null>(null);
+  let editingTable = $state<{ conn: string; db: string; table: string } | null>(null);
   let designerDb = $state('');
   /** 当前活动库：展开库/打开表时记录，新建表/视图默认目标 */
   let activeDb = $state('');
@@ -166,7 +279,7 @@
 
   function openDesigner() {
     editingTable = null;
-    designerDb = activeDb || (dbs[0]?.name ?? dbname);
+    designerDb = activeDb || (connDbs[connId]?.[0]?.name ?? dbname);
     designerName = '';
     designerError = '';
     designerCols = [
@@ -177,10 +290,10 @@
   }
 
   // 打开已有表的设计器（预填当前结构）
-  async function openDesignerForEdit(db: string, table: string) {
+  async function openDesignerForEdit(conn: string, db: string, table: string) {
     try {
-      const cols = await invoke<SchemaColumn[]>('list_columns', { connId, dbname: db, table });
-      editingTable = { db, table };
+      const cols = await invoke<SchemaColumn[]>('list_columns', { connId: conn, dbname: db, table });
+      editingTable = { conn, db, table };
       designerDb = db;
       designerName = table;
       designerComment = '';
@@ -275,7 +388,7 @@
           loadStructure(openTab);
           loadTablePage(openTab);
         }
-        refreshTables(editingTable.db);
+        await refreshTables(editingTable.conn, editingTable.db);
         const ck = `${editingTable.db}.${editingTable.table}`;
         if (columns[ck]) {
           columns[ck] = await invoke<SchemaColumn[]>('list_columns', {
@@ -292,8 +405,8 @@
           columns: cols,
           tableComment: designerComment.trim() === '' ? null : designerComment.trim(),
         });
-        await refreshTables(designerDb);
-        openTableTab(designerDb, designerName.trim());
+        await refreshTables(connId, designerDb);
+        openTableTab(connId, designerDb, designerName.trim());
       }
       showDesigner = false;
       editingTable = null;
@@ -303,10 +416,9 @@
   }
 
   // 刷新库的表列表（保持展开状态）
-  async function refreshTables(db: string) {
-    if (!connId) return;
+  async function refreshTables(conn: string, db: string) {
     try {
-      tables[db] = await invoke<TableInfo[]>('list_tables', { connId, dbname: db });
+      tables[ck(conn, db)] = await invoke<TableInfo[]>('list_tables', { connId: conn, dbname: db });
     } catch (e) {
       status = `刷新表失败: ${e}`;
     }
@@ -458,15 +570,16 @@
   }
 
   // 删除表确认弹窗（WKWebView 不支持 window.confirm，必须自定义）
-  let confirmDrop = $state<{ db: string; table: string; kind?: string } | null>(null);
+  let confirmDrop = $state<{ conn: string; db: string; table: string; kind?: string } | null>(null);
 
   // ===== 表右键菜单 + 复制表 =====
-  let tableMenu = $state<{ x: number; y: number; db: string; table: string; kind: string } | null>(
+  let tableMenu = $state<{ x: number; y: number; conn: string; db: string; table: string; kind: string } | null>(
     null,
   );
   /** 库级右键菜单 */
-  let dbMenu = $state<{ x: number; y: number; db: string } | null>(null);
+  let dbMenu = $state<{ x: number; y: number; conn: string; db: string } | null>(null);
   let dupDialog = $state<{
+    conn: string;
     db: string;
     table: string;
     withData: boolean;
@@ -474,10 +587,10 @@
     err: string;
   } | null>(null);
 
-  function openTableMenu(e: MouseEvent, db: string, table: string, kind = 'table') {
+  function openTableMenu(e: MouseEvent, conn: string, db: string, table: string, kind = 'table') {
     e.preventDefault();
     e.stopPropagation();
-    tableMenu = { x: e.clientX, y: e.clientY, db, table, kind };
+    tableMenu = { x: e.clientX, y: e.clientY, conn, db, table, kind };
   }
 
   /** 树空白区右键：新建数据库 / 刷新全部 */
@@ -491,9 +604,10 @@
   }
 
   /** 在指定库新建查询编辑器 */
-  function newQueryIn(db: string) {
+  function newQueryIn(conn: string, db: string) {
     dbMenu = null;
     activeDb = db;
+    connId = conn;
     const t = newTab('');
     t.dbname = db;
     tabs.push(t);
@@ -501,44 +615,46 @@
   }
 
   /** 从树导出表 SQL */
-  async function exportTableSqlFromTree(db: string, table: string) {
+  async function exportTableSqlFromTree(conn: string, db: string, table: string) {
     tableMenu = null;
     try {
-      const path = await invoke<string>('export_sql', { connId, dbname: db, table });
+      const path = await invoke<string>('export_sql', { connId: conn, dbname: db, table });
       status = `已导出 SQL → ${path}`;
     } catch (e) {
       status = `导出失败: ${e}`;
     }
   }
 
-  function openDbMenu(e: MouseEvent, db: string) {
+  function openDbMenu(e: MouseEvent, conn: string, db: string) {
     e.preventDefault();
     e.stopPropagation();
-    dbMenu = { x: e.clientX, y: e.clientY, db };
+    dbMenu = { x: e.clientX, y: e.clientY, conn, db };
   }
 
   /** 在指定库新建表（右键库 → 在此库新建表） */
-  function createTableIn(db: string) {
+  function createTableIn(conn: string, db: string) {
     dbMenu = null;
     activeDb = db;
+    connId = conn;
     openDesigner();
     designerDb = db;
   }
 
   /** 在指定库新建视图 */
-  function createViewIn(db: string) {
+  function createViewIn(conn: string, db: string) {
     dbMenu = null;
     activeDb = db;
+    connId = conn;
     openViewDialog();
-    viewDialog = { db, name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
+    viewDialog = { conn: connId, db, name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
   }
 
   /** 重新加载指定库的表列表 */
-  async function reloadDb(db: string) {
+  async function reloadDb(conn: string, db: string) {
     dbMenu = null;
-    loadingKey = db;
+    loadingKey = ck(conn, db);
     try {
-      tables[db] = await invoke<TableInfo[]>('list_tables', { connId, dbname: db });
+      tables[ck(conn, db)] = await invoke<TableInfo[]>('list_tables', { connId: conn, dbname: db });
     } catch (e) {
       status = `加载表失败: ${e}`;
     }
@@ -554,31 +670,31 @@
     }
     try {
       await invoke('duplicate_table', {
-        connId,
+        connId: d.conn,
         dbname: d.db,
         srcTable: d.table,
         newTable: d.name.trim(),
         withData: d.withData,
       });
       dupDialog = null;
-      await refreshTables(d.db);
-      openTableTab(d.db, d.name.trim());
+      await refreshTables(d.conn, d.db);
+      openTableTab(d.conn, d.db, d.name.trim());
     } catch (e) {
       d.err = String(e);
     }
   }
 
   // 删除视图（对象树入口）
-  function dropViewFromTree(db: string, view: string) {
-    confirmDrop = { db, table: view, kind: 'view' };
+  function dropViewFromTree(conn: string, db: string, view: string) {
+    confirmDrop = { conn, db, table: view, kind: 'view' };
   }
 
   // ===== 新建视图 =====
   let showViewDialog = $state(false);
-  let viewDialog = $state<{ db: string; name: string; sql: string; err: string } | null>(null);
+  let viewDialog = $state<{ conn: string; db: string; name: string; sql: string; err: string } | null>(null);
 
   function openViewDialog() {
-    viewDialog = { db: activeDb || (dbs[0]?.name ?? dbname), name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
+    viewDialog = { conn: connId, db: activeDb || (connDbs[connId]?.[0]?.name ?? dbname), name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
     showViewDialog = true;
   }
 
@@ -591,28 +707,28 @@
     }
     try {
       await invoke('create_view', {
-        connId,
+        connId: d.conn,
         dbname: d.db,
         viewName: d.name.trim(),
         selectSql: d.sql,
       });
       showViewDialog = false;
-      await refreshTables(d.db);
-      openTableTab(d.db, d.name.trim());
+      await refreshTables(d.conn, d.db);
+      openTableTab(d.conn, d.db, d.name.trim());
     } catch (e) {
       d.err = String(e);
     }
   }
 
   // 删除表（对象树入口）
-  function dropTableFromTree(db: string, table: string) {
-    confirmDrop = { db, table };
+  function dropTableFromTree(conn: string, db: string, table: string) {
+    confirmDrop = { conn, db, table };
   }
 
   // 删除表（表页签工具栏）
   function dropTable(raw: QueryTab) {
     const t = resolveTab(raw);
-    confirmDrop = { db: t.dbname!, table: t.table! };
+    confirmDrop = { conn: t.connId, db: t.dbname!, table: t.table! };
   }
 
   async function doDropConfirm() {
@@ -621,29 +737,51 @@
     confirmDrop = null;
     try {
       if (cd.kind === 'view') {
-        await invoke('drop_view', { connId, dbname: cd.db, viewName: cd.table });
+        await invoke('drop_view', { connId: cd.conn, dbname: cd.db, viewName: cd.table });
+      } else if (cd.kind === 'connection') {
+        await invoke('delete_connection', { name: cd.db });
+        // 若已连接先断开
+        if (cd.conn && connNodes.some((n) => n.id === cd.conn)) {
+          await disconnectConn(cd.conn);
+        } else {
+          connNodes = connNodes.filter((n) => n.name !== cd.db);
+        }
+        await loadSavedConns();
+        return;
       } else if (cd.kind === 'database') {
-        await invoke('drop_database', { connId, name: cd.db });
+        await invoke('drop_database', { connId: cd.conn, name: cd.db });
         // 关闭该库的所有页签 + 清缓存
         for (const t of [...tabs]) {
-          if (t.dbname === cd.db) closeTab(t.id);
+          if (t.connId === cd.conn && t.dbname === cd.db) closeTab(t.id);
         }
-        delete tables[cd.db];
-        delete treeOpen[cd.db];
-        await loadDbs();
+        delete tables[ck(cd.conn, cd.db)];
+        delete treeOpen[ck(cd.conn, cd.db)];
+        if (connDbs[cd.conn]) connDbs[cd.conn] = connDbs[cd.conn].filter((d) => d.name !== cd.db);
         return;
       } else {
-        await invoke('drop_table', { connId, dbname: cd.db, table: cd.table });
+        await invoke('drop_table', { connId: cd.conn, dbname: cd.db, table: cd.table });
       }
-      const openTab = tabs.find((t) => t.kind === 'table' && t.dbname === cd.db && t.table === cd.table);
+      const openTab = tabs.find(
+        (t) => t.kind === 'table' && t.connId === cd.conn && t.dbname === cd.db && t.table === cd.table,
+      );
       if (openTab) closeTab(openTab.id);
-      await refreshTables(cd.db);
+      await refreshTables(cd.conn, cd.db);
     } catch (e) {
       status = `删除失败: ${e}`;
     }
   }
-  let treeOpen = $state<Record<string, boolean>>({}); // key: db / db.table
+  let treeOpen = $state<Record<string, boolean>>({}); // key: connId::db / connId::db.table
   let tables = $state<Record<string, TableInfo[]>>({});
+  /** 连接树节点（Navicat 式多连接） */
+  let connNodes = $state<
+    { id: string; name: string; host: string; port: number; connected: boolean; expanded: boolean }[]
+  >([]);
+  /** 每个连接的库列表 */
+  let connDbs = $state<Record<string, DatabaseInfo[]>>({});
+  /** 缓存 key 前缀（连接隔离） */
+  function ck(conn: string, key: string) {
+    return `${conn}::${key}`;
+  }
   let columns = $state<Record<string, SchemaColumn[]>>({});
   let loadingKey = $state('');
 
@@ -654,21 +792,24 @@
   function searchResults() {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
-    const out: { db: string; table: string; kind: string }[] = [];
-    for (const db of dbs) {
-      const dbs_match = db.name.toLowerCase().includes(q);
-      for (const t of tables[db.name] ?? []) {
-        if (dbs_match || t.name.toLowerCase().includes(q)) {
-          out.push({ db: db.name, table: t.name, kind: t.kind });
-          if (out.length >= 50) return out;
+    const out: { conn: string; db: string; table: string; kind: string }[] = [];
+    for (const c of connNodes) {
+      if (!c.connected) continue;
+      for (const db of connDbs[c.id] ?? []) {
+        const dbs_match = db.name.toLowerCase().includes(q);
+        for (const t of tables[ck(c.id, db.name)] ?? []) {
+          if (dbs_match || t.name.toLowerCase().includes(q)) {
+            out.push({ conn: c.name, db: db.name, table: t.name, kind: t.kind });
+            if (out.length >= 50) return out;
+          }
         }
       }
     }
     return out;
   }
 
-  function openSearchResult(r: { db: string; table: string }) {
-    openTableTab(r.db, r.table);
+  function openSearchResult(r: { conn: string; db: string; table: string }) {
+    openTableTab(r.conn, r.db, r.table);
     searchOpen = false;
     searchQuery = '';
   }
@@ -727,8 +868,8 @@
       status = '至少需要 2 个数据库才能同步';
       return;
     }
-    syncSrc = dbs[0].name;
-    syncDst = dbs[1].name;
+    syncSrc = connDbs[connId]?.[0]?.name ?? '';
+    syncDst = connDbs[connId]?.[1]?.name ?? '';
     syncSrcConn = '__current__';
     syncDstConn = '__current__';
     syncDiffs = [];
@@ -948,6 +1089,8 @@
     explainText?: string;
     message?: string;
     colWidths: Record<string, string>;
+    // 所属连接（多连接）
+    connId: string;
     // 表标签字段
     dbname?: string;
     table?: string;
@@ -975,6 +1118,7 @@
       id: tabSeq++,
       kind: 'query',
       title: `查询 ${tabSeq - 1}`,
+      connId,
       sql,
       results: [],
       columns: [],
@@ -1059,6 +1203,7 @@
       showConnPanel = false;
       ensureTab();
       await loadDbs();
+      syncConnNodes();
       // 勾选保存时写入连接管理
       if (saveConn && connName.trim()) {
         try {
@@ -1139,41 +1284,25 @@
   }
 
   async function doDisconnect() {
-    try {
-      await invoke('disconnect', { connId });
-    } catch {
-      // 忽略
-    }
-    connId = '';
-    version = '';
-    status = '未连接';
-    dbs = [];
-    treeOpen = {};
-    tables = {};
-    columns = {};
-    tabs = [];
-    activeTabId = 0;
+    await disconnectConn(connId);
     showConnPanel = true;
   }
 
   // ================= 对象树加载 =================
   async function loadDbs() {
     if (!connId) return;
-    try {
-      dbs = await invoke<DatabaseInfo[]>('list_databases', { connId });
-    } catch (e) {
-      status = `加载数据库失败: ${e}`;
-    }
+    await loadDbsFor(connId);
   }
 
-  async function toggleDb(db: string) {
-    const key = db;
+  async function toggleDb(conn: string, db: string) {
+    const key = ck(conn, db);
     treeOpen[key] = !treeOpen[key];
     activeDb = db;
+    connId = conn;
     if (treeOpen[key] && !tables[key]) {
       loadingKey = key;
       try {
-        tables[key] = await invoke<TableInfo[]>('list_tables', { connId, dbname: db });
+        tables[key] = await invoke<TableInfo[]>('list_tables', { connId: conn, dbname: db });
       } catch (e) {
         status = `加载表失败: ${e}`;
       }
@@ -1181,14 +1310,15 @@
     }
   }
 
-  async function toggleTable(db: string, table: string) {
-    const key = `${db}.${table}`;
+  async function toggleTable(conn: string, db: string, table: string) {
+    const key = ck(conn, `${db}.${table}`);
     treeOpen[key] = !treeOpen[key];
+    connId = conn;
     if (treeOpen[key] && !columns[key]) {
       loadingKey = key;
       try {
         columns[key] = await invoke<SchemaColumn[]>('list_columns', {
-          connId,
+          connId: conn,
           dbname: db,
           table,
         });
@@ -1200,9 +1330,10 @@
   }
 
   // 双击表：打开表专属页签（数据/结构/SQL预览）
-  function openTableTab(db: string, table: string) {
+  function openTableTab(conn: string, db: string, table: string) {
+    connId = conn;
     activeDb = db;
-    const exist = tabs.find((t) => t.kind === 'table' && t.dbname === db && t.table === table);
+    const exist = tabs.find((t) => t.kind === 'table' && t.connId === conn && t.dbname === db && t.table === table);
     if (exist) {
       activeTabId = exist.id;
       return;
@@ -1211,6 +1342,7 @@
       id: tabSeq++,
       kind: 'table',
       title: table,
+      connId: conn,
       sql: '',
       results: [],
       columns: [],
@@ -1248,7 +1380,7 @@
   // 加载表数据页
   async function loadTablePage(raw: QueryTab) {
     const t = resolveTab(raw);
-    if (!connId || !t.dbname || !t.table) return;
+    if (!t.connId || !t.dbname || !t.table) return;
     t.loading = true;
     t.error = '';
     try {
@@ -1257,7 +1389,7 @@
         rows: unknown[][];
         total: number | null;
       }>('paginate_table', {
-        connId,
+        connId: t.connId,
         dbname: t.dbname,
         table: t.table,
         limit: t.pageSize,
@@ -1286,16 +1418,16 @@
   // 加载表结构
   async function loadStructure(raw: QueryTab) {
     const t = resolveTab(raw);
-    if (!connId || !t.dbname || !t.table) return;
+    if (!t.connId || !t.dbname || !t.table) return;
     if (t.structure) return;
     try {
       t.structure = await invoke<SchemaColumn[]>('list_columns', {
-        connId,
+        connId: t.connId,
         dbname: t.dbname,
         table: t.table,
       });
       t.indexes = await invoke<IndexInfo[]>('list_indexes', {
-        connId,
+        connId: t.connId,
         dbname: t.dbname,
         table: t.table,
       });
@@ -1373,7 +1505,7 @@
     const value = t.editValue?.trim() === '' ? null : t.editValue;
     try {
       await invoke('update_cell', {
-        connId,
+        connId: t.connId,
         dbname: t.dbname,
         table: t.table,
         pkCols,
@@ -1391,7 +1523,7 @@
   async function addRow(raw: QueryTab) {
     const t = resolveTab(raw);
     try {
-      await invoke('insert_row', { connId, dbname: t.dbname, table: t.table });
+      await invoke('insert_row', { connId: t.connId, dbname: t.dbname, table: t.table });
       await loadTablePage(t);
     } catch (e) {
       t.error = String(e);
@@ -1409,7 +1541,7 @@
     });
     try {
       await invoke('delete_row', {
-        connId,
+        connId: t.connId,
         dbname: t.dbname,
         table: t.table,
         pkCols,
@@ -1426,7 +1558,7 @@
     const t = resolveTab(raw);
     try {
       const path = await invoke<string>('export_csv', {
-        connId,
+        connId: t.connId,
         dbname: t.dbname,
         table: t.table,
       });
@@ -1470,10 +1602,10 @@
 
   async function runExplain(tab?: QueryTab) {
     const t = tab ?? activeTab;
-    if (!t || !connId || !t.sql.trim()) return;
+    if (!t || !t.connId || !t.sql.trim()) return;
     t.running = true;
     try {
-      t.explainText = await invoke<string>('explain_query', { connId, sql: t.sql });
+      t.explainText = await invoke<string>('explain_query', { connId: t.connId, sql: t.sql });
       t.error = '';
     } catch (e) {
       t.error = String(e);
@@ -1496,14 +1628,14 @@
 
   async function runQuery(tab?: QueryTab) {
     const t = tab ?? activeTab;
-    if (!t || !connId || !t.sql.trim()) return;
+    if (!t || !t.connId || !t.sql.trim()) return;
     t.running = true;
     t.error = '';
     t.explainText = undefined; // 执行新查询时清掉旧执行计划
     const t0 = performance.now();
     try {
       const res = await invoke<{ results: QueryResultView[] }>('query', {
-        connId,
+        connId: t.connId,
         sql: t.sql,
       });
       t.results = res.results;
@@ -1769,103 +1901,127 @@
       style={`width:${sidebarWidth}px`}
       oncontextmenu={openBlankMenu}
     >
-      <div class="sidebar-title">
-        连接
-        {#if connId}
-          <button
-            class="db-add-btn"
-            onclick={openDbDialog}
-            data-tip="新建数据库"
-            aria-label="新建数据库"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-          </button>
-        {/if}
-      </div>
-      {#if connId}
+      <div class="sidebar-title">连接</div>
+      {#if connNodes.length > 0}
         <div class="tree">
-          {#each dbs as db}
+          {#each connNodes as c}
             <div class="tree-node">
               <div
-                class="tree-row"
-                class:open={treeOpen[db.name]}
+                class="tree-row conn-row"
+                class:active={c.id === connId}
                 role="button"
                 tabindex="0"
-                onclick={() => toggleDb(db.name)}
-                oncontextmenu={(e) => openDbMenu(e, db.name)}
-                onkeydown={(e) => e.key === 'Enter' && toggleDb(db.name)}
+                onclick={() => connRowClick(c)}
+                oncontextmenu={(e) => openConnMenu(e, c)}
+                onkeydown={(e) => e.key === 'Enter' && connRowClick(c)}
               >
-                <span class="arrow">{treeOpen[db.name] ? '▾' : '▸'}</span>
-                <span class="ico">🗄</span>
-                <span class="label">{db.name}</span>
-                {#if loadingKey === db.name}<span class="spin">…</span>{/if}
+                <span class="arrow">{c.connected && c.expanded ? '▾' : '▸'}</span>
+                <span class="ico conn-dot" class:ok={c.connected}>{c.connected ? '●' : '○'}</span>
+                <span class="label">{c.name}</span>
+                {#if c.connected}<span class="conn-host">{c.host}:{c.port}</span>{/if}
+                {#if c.connected && c.id === connId}
+                  <button
+                    class="db-add-btn"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      openDbDialog();
+                    }}
+                    data-tip="新建数据库"
+                    aria-label="新建数据库"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <line x1="12" y1="5" x2="12" y2="19" />
+                      <line x1="5" y1="12" x2="19" y2="12" />
+                    </svg>
+                  </button>
+                {/if}
               </div>
-              {#if treeOpen[db.name] && tables[db.name]}
+              {#if c.connected && c.expanded}
                 <div class="tree-children">
-                  {#each tables[db.name] as tb}
+                  {#each connDbs[c.id] ?? [] as db}
                     <div class="tree-node">
                       <div
                         class="tree-row"
-                        class:open={treeOpen[`${db.name}.${tb.name}`]}
+                        class:open={treeOpen[ck(c.id, db.name)]}
                         role="button"
                         tabindex="0"
-                        onclick={() => openTableTab(db.name, tb.name)}
-                        onkeydown={(e) => e.key === 'Enter' && openTableTab(db.name, tb.name)}
-                        oncontextmenu={(e) => openTableMenu(e, db.name, tb.name, tb.kind)}
-                        title="单击打开表 · 右键更多操作"
+                        onclick={() => toggleDb(c.id, db.name)}
+                        oncontextmenu={(e) => openDbMenu(e, c.id, db.name)}
+                        onkeydown={(e) => e.key === 'Enter' && toggleDb(c.id, db.name)}
                       >
-                        <span
-                          class="arrow"
-                          role="button"
-                          tabindex="0"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            toggleTable(db.name, tb.name);
-                          }}
-                          onkeydown={(e) => {
-                            e.stopPropagation();
-                            if (e.key === 'Enter') toggleTable(db.name, tb.name);
-                          }}
-                          >{treeOpen[`${db.name}.${tb.name}`] ? '▾' : '▸'}</span
-                        >
-                        <span class="ico">{tb.kind === 'view' ? '👁' : '📋'}</span>
-                        <span class="label">{tb.name}</span>
-                        {#if loadingKey === `${db.name}.${tb.name}`}<span class="spin">…</span>{/if}
-                        {#if tb.kind === 'table'}
-                          <button
-                            class="tree-del"
-                            onclick={(e) => {
-                              e.stopPropagation();
-                              openDesignerForEdit(db.name, tb.name);
-                            }}
-                            title="编辑表结构"
-                            >✎</button
-                          >
-                        {/if}
-                        <button
-                          class="tree-del"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            if (tb.kind === 'view') {
-                              dropViewFromTree(db.name, tb.name);
-                            } else {
-                              dropTableFromTree(db.name, tb.name);
-                            }
-                          }}
-                          title="删除（不可恢复）"
-                          >🗑</button
-                        >
+                        <span class="arrow">{treeOpen[ck(c.id, db.name)] ? '▾' : '▸'}</span>
+                        <span class="ico">🗄</span>
+                        <span class="label">{db.name}</span>
+                        {#if loadingKey === ck(c.id, db.name)}<span class="spin">…</span>{/if}
                       </div>
-                      {#if treeOpen[`${db.name}.${tb.name}`] && columns[`${db.name}.${tb.name}`]}
+                      {#if treeOpen[ck(c.id, db.name)] && tables[ck(c.id, db.name)]}
                         <div class="tree-children">
-                          {#each columns[`${db.name}.${tb.name}`] as col}
-                            <div class="tree-row leaf">
-                              <span class="ico">{col.is_pk ? '🔑' : '▫'}</span>
-                              <span class="label">{col.name}</span>
-                              <span class="type">{col.type_name}</span>
+                          {#each tables[ck(c.id, db.name)] as tb}
+                            <div class="tree-node">
+                              <div
+                                class="tree-row"
+                                class:open={treeOpen[ck(c.id, `${db.name}.${tb.name}`)]}
+                                role="button"
+                                tabindex="0"
+                                onclick={() => openTableTab(c.id, db.name, tb.name)}
+                                onkeydown={(e) => e.key === 'Enter' && openTableTab(c.id, db.name, tb.name)}
+                                oncontextmenu={(e) => openTableMenu(e, c.id, db.name, tb.name, tb.kind)}
+                              >
+                                <span
+                                  class="arrow"
+                                  role="button"
+                                  tabindex="0"
+                                  onclick={(e) => {
+                                    e.stopPropagation();
+                                    toggleTable(c.id, db.name, tb.name);
+                                  }}
+                                  onkeydown={(e) => {
+                                    e.stopPropagation();
+                                    if (e.key === 'Enter') toggleTable(c.id, db.name, tb.name);
+                                  }}
+                                  >{treeOpen[ck(c.id, `${db.name}.${tb.name}`)] ? '▾' : '▸'}</span
+                                >
+                                <span class="ico">{tb.kind === 'view' ? '👁' : '📋'}</span>
+                                <span class="label">{tb.name}</span>
+                                {#if loadingKey === ck(c.id, `${db.name}.${tb.name}`)}<span class="spin">…</span>{/if}
+                                {#if tb.kind === 'table'}
+                                  <button
+                                    class="tree-del"
+                                    onclick={(e) => {
+                                      e.stopPropagation();
+                                      openDesignerForEdit(c.id, db.name, tb.name);
+                                    }}
+                                    data-tip="编辑表结构"
+                                    aria-label="编辑表结构"
+                                    >✎</button
+                                  >
+                                {/if}
+                                <button
+                                  class="tree-del"
+                                  onclick={(e) => {
+                                    e.stopPropagation();
+                                    if (tb.kind === 'view') {
+                                      dropViewFromTree(c.id, db.name, tb.name);
+                                    } else {
+                                      dropTableFromTree(c.id, db.name, tb.name);
+                                    }
+                                  }}
+                                  data-tip="删除（不可恢复）"
+                                  aria-label="删除"
+                                  >🗑</button
+                                >
+                              </div>
+                              {#if treeOpen[ck(c.id, `${db.name}.${tb.name}`)] && columns[ck(c.id, `${db.name}.${tb.name}`)]}
+                                <div class="tree-children">
+                                  {#each columns[ck(c.id, `${db.name}.${tb.name}`)] as col}
+                                    <div class="tree-row leaf">
+                                      <span class="ico">{col.is_pk ? '🔑' : '▫'}</span>
+                                      <span class="label">{col.name}</span>
+                                      <span class="type">{col.type_name}</span>
+                                    </div>
+                                  {/each}
+                                </div>
+                              {/if}
                             </div>
                           {/each}
                         </div>
@@ -1878,7 +2034,7 @@
           {/each}
         </div>
       {:else}
-        <div class="empty-tree">连接后显示数据库对象</div>
+        <div class="empty-tree">在「连接管理」中保存连接，双击连接展开数据库</div>
       {/if}
     </aside>
 
@@ -2198,7 +2354,7 @@
               <div class="result">
                 <div class="struct-toolbar">
                   <button
-                    onclick={() => openDesignerForEdit(activeTab.dbname!, activeTab.table!)}
+                    onclick={() => openDesignerForEdit(activeTab.connId, activeTab.dbname!, activeTab.table!)}
                     title="修改表结构（增删字段/改类型/改默认值）"
                     >✎ 编辑结构</button
                   >
@@ -2307,7 +2463,7 @@
           <div class="field">
             <label for="d-db">数据库</label>
             <select id="d-db" bind:value={designerDb} disabled={!!editingTable}>
-              {#each dbs as db}
+              {#each (connDbs[connId] ?? []) as db}
                 <option value={db.name}>{db.name}</option>
               {/each}
             </select>
@@ -2500,7 +2656,7 @@
             <div class="field">
               <label for="s-src">源数据库</label>
               <select id="s-src" bind:value={syncSrc}>
-                {#each dbs as db}
+                {#each (connDbs[connId] ?? []) as db}
                   <option value={db.name}>{db.name}</option>
                 {/each}
               </select>
@@ -2509,7 +2665,7 @@
             <div class="field">
               <label for="s-dst">目标数据库</label>
               <select id="s-dst" bind:value={syncDst}>
-                {#each dbs as db}
+                {#each (connDbs[connId] ?? []) as db}
                   <option value={db.name}>{db.name}</option>
                 {/each}
               </select>
@@ -2824,7 +2980,7 @@
           <div class="field">
             <label for="v-db">数据库</label>
             <select id="v-db" bind:value={viewDialog.db}>
-              {#each dbs as db}
+              {#each (connDbs[connId] ?? []) as db}
                 <option value={db.name}>{db.name}</option>
               {/each}
             </select>
@@ -2848,6 +3004,60 @@
     </div>
   {/if}
 
+  <!-- ============ 连接右键菜单 ============ -->
+  {#if connMenu}
+    <div
+      class="ctx-overlay"
+      role="presentation"
+      onclick={() => (connMenu = null)}
+      oncontextmenu={(e) => {
+        e.preventDefault();
+        connMenu = null;
+      }}
+    ></div>
+    <div class="ctx-menu" style="left:{connMenu!.x}px; top:{connMenu!.y}px">
+      <div class="ctx-title">🔌 {connMenu!.name}</div>
+      {#if connMenu!.connected}
+        <button
+          onclick={() => {
+            const m = connMenu!;
+            connMenu = null;
+            connRowClick(m);
+          }}
+          >⇅ 展开/收起</button
+        >
+        <button
+          class="ctx-danger"
+          onclick={() => {
+            const m = connMenu!;
+            connMenu = null;
+            disconnectConn(m.id);
+          }}
+          >⏻ 断开连接</button
+        >
+      {:else}
+        <button
+          onclick={() => {
+            const m = connMenu!;
+            connMenu = null;
+            connectByName(m.name);
+          }}
+          >🔗 连接</button
+        >
+      {/if}
+      <div class="ctx-sep"></div>
+      <button
+        class="ctx-danger"
+        onclick={() => {
+          const m = connMenu!;
+          connMenu = null;
+          confirmDrop = { conn: m.id, db: m.name, table: '', kind: 'connection' };
+        }}
+        >🗑 删除连接</button
+      >
+    </div>
+  {/if}
+
   <!-- ============ 库右键菜单 ============ -->
   {#if dbMenu}
     <div
@@ -2861,15 +3071,15 @@
     ></div>
     <div class="ctx-menu" style="left:{dbMenu!.x}px; top:{dbMenu!.y}px">
       <div class="ctx-title">🗄 {dbMenu!.db}</div>
-      <button onclick={() => createTableIn(dbMenu!.db)}>＋ 在此库新建表</button>
-      <button onclick={() => createViewIn(dbMenu!.db)}>＋ 在此库新建视图</button>
-      <button onclick={() => newQueryIn(dbMenu!.db)}>⌨ 打开查询编辑器</button>
+      <button onclick={() => createTableIn(dbMenu!.conn, dbMenu!.db)}>＋ 在此库新建表</button>
+      <button onclick={() => createViewIn(dbMenu!.conn, dbMenu!.db)}>＋ 在此库新建视图</button>
+      <button onclick={() => newQueryIn(dbMenu!.conn, dbMenu!.db)}>⌨ 打开查询编辑器</button>
       <div class="ctx-sep"></div>
-      <button onclick={() => reloadDb(dbMenu!.db)}>⟳ 刷新该库</button>
+      <button onclick={() => reloadDb(dbMenu!.conn, dbMenu!.db)}>⟳ 刷新该库</button>
       <button
         class="ctx-danger"
         onclick={() => {
-          confirmDrop = { db: dbMenu!.db, table: '', kind: 'database' };
+          confirmDrop = { conn: dbMenu!.conn, db: dbMenu!.db, table: '', kind: 'database' };
           dbMenu = null;
         }}
         >🗑 删除数据库</button
@@ -2908,7 +3118,7 @@
     <div class="ctx-menu" style="left:{tableMenu!.x}px; top:{tableMenu!.y}px">
       <button
         onclick={() => {
-          openTableTab(tableMenu!.db, tableMenu!.table);
+          openTableTab(tableMenu!.conn, tableMenu!.db, tableMenu!.table);
           tableMenu = null;
         }}
         >📖 打开</button
@@ -2916,7 +3126,7 @@
       {#if tableMenu!.kind === 'table'}
         <button
           onclick={() => {
-            openDesignerForEdit(tableMenu!.db, tableMenu!.table);
+            openDesignerForEdit(tableMenu!.conn, tableMenu!.db, tableMenu!.table);
             tableMenu = null;
           }}
           >✎ 编辑表结构</button
@@ -2925,6 +3135,7 @@
         <button
           onclick={() => {
             dupDialog = {
+              conn: tableMenu!.conn,
               db: tableMenu!.db,
               table: tableMenu!.table,
               withData: false,
@@ -2938,6 +3149,7 @@
         <button
           onclick={() => {
             dupDialog = {
+              conn: tableMenu!.conn,
               db: tableMenu!.db,
               table: tableMenu!.table,
               withData: true,
@@ -2950,7 +3162,7 @@
         >
         <div class="ctx-sep"></div>
         <button
-          onclick={() => exportTableSqlFromTree(tableMenu!.db, tableMenu!.table)}
+          onclick={() => exportTableSqlFromTree(tableMenu!.conn, tableMenu!.db, tableMenu!.table)}
           >⬇ 导出 SQL</button
         >
       {/if}
@@ -2959,9 +3171,9 @@
         class="ctx-danger"
         onclick={() => {
           if (tableMenu!.kind === 'view') {
-            dropViewFromTree(tableMenu!.db, tableMenu!.table);
+            dropViewFromTree(tableMenu!.conn, tableMenu!.db, tableMenu!.table);
           } else {
-            dropTableFromTree(tableMenu!.db, tableMenu!.table);
+            dropTableFromTree(tableMenu!.conn, tableMenu!.db, tableMenu!.table);
           }
           tableMenu = null;
         }}
@@ -3016,7 +3228,13 @@
         onkeydown={(e) => e.key === 'Escape' && (confirmDrop = null)}
       >
         <div class="dialog-head">
-          <span class="dialog-title">{confirmDrop.kind === 'database' ? '🗑 删除数据库' : '🗑 删除表'}</span>
+          <span class="dialog-title">
+            {confirmDrop.kind === 'database'
+              ? '🗑 删除数据库'
+              : confirmDrop.kind === 'connection'
+                ? '🗑 删除连接'
+                : '🗑 删除表'}
+          </span>
           <button class="dialog-close" onclick={() => (confirmDrop = null)}>×</button>
         </div>
         <div class="dialog-body">
@@ -3026,6 +3244,9 @@
             {:else if confirmDrop.kind === 'database'}
               确定删除数据库「<b>{confirmDrop.db}</b>」？<br />
               <span class="confirm-warn">库中所有表和数据将全部删除，此操作不可撤销！</span>
+            {:else if confirmDrop.kind === 'connection'}
+              确定删除连接「<b>{confirmDrop.db}</b>」？<br />
+              <span class="confirm-warn">该连接配置将被移除（不影响服务器上的数据）</span>
             {:else}
               确定删除表「<b>{confirmDrop.table}</b>」？<br />
               <span class="confirm-warn">表中数据将全部丢失，此操作不可撤销！</span>
@@ -3646,6 +3867,37 @@
 
   .tree-row:hover {
     background: #242833;
+  }
+
+  /* 连接树节点（Navicat 式） */
+  .conn-row {
+    font-weight: 600;
+    color: #e8ebf0;
+    padding: 5px 12px 5px 8px;
+    border-left: 2px solid transparent;
+  }
+
+  .conn-row.active {
+    border-left-color: #2f6fed;
+    background: #1d2a44;
+  }
+
+  .conn-dot {
+    font-size: 9px;
+    color: #5a6270;
+  }
+
+  .conn-dot.ok {
+    color: #3fbf6a;
+  }
+
+  .conn-host {
+    font-size: 10px;
+    font-weight: 400;
+    color: #6b7484;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 110px;
   }
 
   .tree-row.leaf {
