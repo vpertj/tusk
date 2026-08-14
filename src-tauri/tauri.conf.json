@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tusk",
+  "productName": "Tusk",
   "version": "1.0.0",
   "identifier": "com.tusk.app",
   "build": {
