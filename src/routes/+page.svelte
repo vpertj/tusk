@@ -134,6 +134,8 @@
   let showDesigner = $state(false);
   let editingTable = $state<{ db: string; table: string } | null>(null);
   let designerDb = $state('');
+  /** 当前活动库：展开库/打开表时记录，新建表/视图默认目标 */
+  let activeDb = $state('');
   let designerName = $state('');
   let designerComment = $state('');
   let designerError = $state('');
@@ -156,7 +158,7 @@
 
   function openDesigner() {
     editingTable = null;
-    designerDb = dbs[0]?.name ?? dbname;
+    designerDb = activeDb || dbs[0]?.name ?? dbname;
     designerName = '';
     designerError = '';
     designerCols = [
@@ -457,6 +459,8 @@
   let tableMenu = $state<{ x: number; y: number; db: string; table: string; kind: string } | null>(
     null,
   );
+  /** 库级右键菜单 */
+  let dbMenu = $state<{ x: number; y: number; db: string } | null>(null);
   let dupDialog = $state<{
     db: string;
     table: string;
@@ -468,6 +472,40 @@
   function openTableMenu(e: MouseEvent, db: string, table: string, kind = 'table') {
     e.preventDefault();
     tableMenu = { x: e.clientX, y: e.clientY, db, table, kind };
+  }
+
+  function openDbMenu(e: MouseEvent, db: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    dbMenu = { x: e.clientX, y: e.clientY, db };
+  }
+
+  /** 在指定库新建表（右键库 → 在此库新建表） */
+  function createTableIn(db: string) {
+    dbMenu = null;
+    activeDb = db;
+    openDesigner();
+    designerDb = db;
+  }
+
+  /** 在指定库新建视图 */
+  function createViewIn(db: string) {
+    dbMenu = null;
+    activeDb = db;
+    openViewDialog();
+    viewDialog = { db, name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
+  }
+
+  /** 重新加载指定库的表列表 */
+  async function reloadDb(db: string) {
+    dbMenu = null;
+    loadingKey = db;
+    try {
+      tables[db] = await invoke<TableInfo[]>('list_tables', { connId, dbname: db });
+    } catch (e) {
+      status = `加载表失败: ${e}`;
+    }
+    loadingKey = '';
   }
 
   async function doDuplicate() {
@@ -503,7 +541,7 @@
   let viewDialog = $state<{ db: string; name: string; sql: string; err: string } | null>(null);
 
   function openViewDialog() {
-    viewDialog = { db: dbs[0]?.name ?? dbname, name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
+    viewDialog = { db: activeDb || dbs[0]?.name ?? dbname, name: '', sql: 'SELECT\n  *\nFROM\n  "public"."表名"', err: '' };
     showViewDialog = true;
   }
 
@@ -1005,6 +1043,7 @@
   async function toggleDb(db: string) {
     const key = db;
     treeOpen[key] = !treeOpen[key];
+    activeDb = db;
     if (treeOpen[key] && !tables[key]) {
       loadingKey = key;
       try {
@@ -1036,6 +1075,7 @@
 
   // 双击表：打开表专属页签（数据/结构/SQL预览）
   function openTableTab(db: string, table: string) {
+    activeDb = db;
     const exist = tabs.find((t) => t.kind === 'table' && t.dbname === db && t.table === table);
     if (exist) {
       activeTabId = exist.id;
@@ -1621,7 +1661,7 @@
           <button
             class="db-add-btn"
             onclick={openDbDialog}
-            title="新建数据库"
+            data-tip="新建数据库"
             aria-label="新建数据库"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1641,6 +1681,7 @@
                 role="button"
                 tabindex="0"
                 onclick={() => toggleDb(db.name)}
+                oncontextmenu={(e) => openDbMenu(e, db.name)}
                 onkeydown={(e) => e.key === 'Enter' && toggleDb(db.name)}
               >
                 <span class="arrow">{treeOpen[db.name] ? '▾' : '▸'}</span>
@@ -2647,6 +2688,26 @@
     </div>
   {/if}
 
+  <!-- ============ 库右键菜单 ============ -->
+  {#if dbMenu}
+    <div
+      class="ctx-overlay"
+      role="presentation"
+      onclick={() => (dbMenu = null)}
+      oncontextmenu={(e) => {
+        e.preventDefault();
+        dbMenu = null;
+      }}
+    ></div>
+    <div class="ctx-menu" style="left:{dbMenu!.x}px; top:{dbMenu!.y}px">
+      <div class="ctx-title">🗄 {dbMenu!.db}</div>
+      <button onclick={() => createTableIn(dbMenu!.db)}>＋ 在此库新建表</button>
+      <button onclick={() => createViewIn(dbMenu!.db)}>＋ 在此库新建视图</button>
+      <div class="ctx-sep"></div>
+      <button onclick={() => reloadDb(dbMenu!.db)}>⟳ 刷新该库</button>
+    </div>
+  {/if}
+
   <!-- ============ 表右键菜单 ============ -->
   {#if tableMenu}
     <div
@@ -3325,6 +3386,34 @@
     color: #e8ebf0;
   }
 
+  .db-add-btn[data-tip] {
+    position: relative;
+  }
+
+  .db-add-btn[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #262b36;
+    border: 1px solid #3a4150;
+    color: #e8ebf0;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .db-add-btn[data-tip]:hover::after {
+    opacity: 1;
+  }
+
   .db-add-btn svg {
     width: 13px;
     height: 13px;
@@ -3904,6 +3993,16 @@
     color: #5c6472;
     font-size: 11px;
     margin: 4px 0 0;
+  }
+
+  /* 库右键菜单标题 */
+  .ctx-title {
+    padding: 6px 12px 8px;
+    font-size: 11px;
+    color: #8b93a3;
+    border-bottom: 1px solid #23262e;
+    margin-bottom: 4px;
+    white-space: nowrap;
   }
 
   /* 右键菜单 */
