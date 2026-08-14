@@ -1713,6 +1713,37 @@ async fn create_database(
     create_database_core(&cfg, &name, owner.as_deref(), encoding.as_deref()).await
 }
 
+/// 核心：删除数据库（DROP DATABASE ... WITH (FORCE)，标识符白名单）
+async fn drop_database_core(cfg: &ConnConfig, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("数据库名不能为空".into());
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err("数据库名只能包含字母、数字和下划线".into());
+    }
+    let sql = format!("DROP DATABASE \"{name}\" WITH (FORCE)");
+    let (client, _) = open_connection(cfg).await?;
+    client
+        .execute(&sql, &[])
+        .await
+        .map_err(|e| format!("删除数据库失败: {e:?}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn drop_database(
+    state: State<'_, AppState>,
+    conn_id: String,
+    name: String,
+) -> Result<(), String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    drop_database_core(&cfg, &name).await
+}
+
 #[tauri::command]
 async fn compare_schemas(
     state: State<'_, AppState>,
@@ -3762,6 +3793,26 @@ mod tests {
 
         admin.execute(&format!("DROP DATABASE IF EXISTS \"{name}\""), &[]).await.ok();
     }
+
+    #[tokio::test]
+    async fn test_drop_database() {
+        let cfg = test_cfg();
+        let name = format!("tusk_drop_{}", std::process::id());
+        let admin = open_connection(&cfg).await.expect("连接失败").0;
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{name}\""), &[]).await.ok();
+
+        create_database_core(&cfg, &name, None, None).await.expect("创建失败");
+        // 删除
+        drop_database_core(&cfg, &name).await.expect("删除失败");
+        let dbs = list_databases_core(&admin).await.expect("列库失败");
+        assert!(!dbs.iter().any(|d| d.name == name), "删除后不应存在");
+        // 删除不存在的库应报错
+        let err = drop_database_core(&cfg, &name).await.expect_err("删不存在的库应报错");
+        assert!(err.contains("不存在") || err.to_lowercase().contains("exist"), "错误: {err}");
+        // 非法名拒绝
+        let err2 = drop_database_core(&cfg, "x; DROP DATABASE y").await.expect_err("非法名应拒绝");
+        assert!(err2.contains("只能包含"), "错误: {err2}");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3802,7 +3853,8 @@ pub fn run() {
             execute_sql,
             open_url,
             check_update,
-            create_database
+            create_database,
+            drop_database
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

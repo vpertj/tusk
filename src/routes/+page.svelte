@@ -471,7 +471,42 @@
 
   function openTableMenu(e: MouseEvent, db: string, table: string, kind = 'table') {
     e.preventDefault();
+    e.stopPropagation();
     tableMenu = { x: e.clientX, y: e.clientY, db, table, kind };
+  }
+
+  /** 树空白区右键：新建数据库 / 刷新全部 */
+  let blankMenu = $state<{ x: number; y: number } | null>(null);
+
+  function openBlankMenu(e: MouseEvent) {
+    if (!connId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    blankMenu = { x: e.clientX, y: e.clientY };
+  }
+
+  /** 在指定库新建查询编辑器 */
+  function newQueryIn(db: string) {
+    dbMenu = null;
+    activeDb = db;
+    const t = newTab('');
+    t.dbname = db;
+    tabs.push(t);
+    activeTabId = t.id;
+  }
+
+  /** 从树导出表 SQL */
+  async function exportTableSqlFromTree(db: string, table: string) {
+    tableMenu = null;
+    try {
+      const sql = await invoke<string>('export_sql', { connId, dbname: db, table });
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const path = `~/Downloads/tusk-${table}-${ts}.sql`;
+      await invoke('write_text_file', { path, content: sql });
+      status = `已导出 SQL → ${path}`;
+    } catch (e) {
+      status = `导出失败: ${e}`;
+    }
   }
 
   function openDbMenu(e: MouseEvent, db: string) {
@@ -585,6 +620,14 @@
     try {
       if (cd.kind === 'view') {
         await invoke('drop_view', { connId, dbname: cd.db, viewName: cd.table });
+      } else if (cd.kind === 'database') {
+        await invoke('drop_database', { connId, name: cd.db });
+        // 关闭该库的所有页签
+        for (const t of [...tabs]) {
+          if (t.dbname === cd.db) closeTab(t.id);
+        }
+        await loadDbs();
+        return;
       } else {
         await invoke('drop_table', { connId, dbname: cd.db, table: cd.table });
       }
@@ -1654,7 +1697,11 @@
     {/if}
 
     <!-- ============ 左侧对象树 ============ -->
-    <aside class="sidebar" style={`width:${sidebarWidth}px`}>
+    <aside
+      class="sidebar"
+      style={`width:${sidebarWidth}px`}
+      oncontextmenu={openBlankMenu}
+    >
       <div class="sidebar-title">
         连接
         {#if connId}
@@ -2703,8 +2750,34 @@
       <div class="ctx-title">🗄 {dbMenu!.db}</div>
       <button onclick={() => createTableIn(dbMenu!.db)}>＋ 在此库新建表</button>
       <button onclick={() => createViewIn(dbMenu!.db)}>＋ 在此库新建视图</button>
+      <button onclick={() => newQueryIn(dbMenu!.db)}>⌨ 打开查询编辑器</button>
       <div class="ctx-sep"></div>
       <button onclick={() => reloadDb(dbMenu!.db)}>⟳ 刷新该库</button>
+      <button
+        class="ctx-danger"
+        onclick={() => {
+          confirmDrop = { db: dbMenu!.db, table: '', kind: 'database' };
+          dbMenu = null;
+        }}
+        >🗑 删除数据库</button
+      >
+    </div>
+  {/if}
+
+  <!-- ============ 树空白区右键菜单 ============ -->
+  {#if blankMenu}
+    <div
+      class="ctx-overlay"
+      role="presentation"
+      onclick={() => (blankMenu = null)}
+      oncontextmenu={(e) => {
+        e.preventDefault();
+        blankMenu = null;
+      }}
+    ></div>
+    <div class="ctx-menu" style="left:{blankMenu!.x}px; top:{blankMenu!.y}px">
+      <button onclick={openDbDialog}>＋ 新建数据库</button>
+      <button onclick={() => loadDbs()} disabled={!connId}>⟳ 刷新全部</button>
     </div>
   {/if}
 
@@ -2761,6 +2834,11 @@
             tableMenu = null;
           }}
           >⧉ 复制表（含数据）</button
+        >
+        <div class="ctx-sep"></div>
+        <button
+          onclick={() => exportTableSqlFromTree(tableMenu!.db, tableMenu!.table)}
+          >⬇ 导出 SQL</button
         >
       {/if}
       <div class="ctx-sep"></div>
@@ -2825,13 +2903,16 @@
         onkeydown={(e) => e.key === 'Escape' && (confirmDrop = null)}
       >
         <div class="dialog-head">
-          <span class="dialog-title">🗑 删除表</span>
+          <span class="dialog-title">{confirmDrop.kind === 'database' ? '🗑 删除数据库' : '🗑 删除表'}</span>
           <button class="dialog-close" onclick={() => (confirmDrop = null)}>×</button>
         </div>
         <div class="dialog-body">
           <p class="confirm-text">
             {#if confirmDrop.kind === 'view'}
               确定删除视图「<b>{confirmDrop.table}</b>」？
+            {:else if confirmDrop.kind === 'database'}
+              确定删除数据库「<b>{confirmDrop.db}</b>」？<br />
+              <span class="confirm-warn">库中所有表和数据将全部删除，此操作不可撤销！</span>
             {:else}
               确定删除表「<b>{confirmDrop.table}</b>」？<br />
               <span class="confirm-warn">表中数据将全部丢失，此操作不可撤销！</span>
