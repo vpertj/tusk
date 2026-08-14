@@ -3225,7 +3225,7 @@
   .toolbar button[data-tip]::after {
     content: attr(data-tip);
     position: absolute;
-    top: calc(100% + 8px);
+    top: calc(100% + 12px);
     left: 50%;
     transform: translateX(-50%);
     background: #262b36;
@@ -3238,7 +3238,7 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.12s ease;
-    z-index: 100;
+    z-index: 300;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   }
 
@@ -3596,7 +3596,7 @@
   .db-add-btn[data-tip]::after {
     content: attr(data-tip);
     position: absolute;
-    top: calc(100% + 8px);
+    top: calc(100% + 12px);
     left: 50%;
     transform: translateX(-50%);
     background: #262b36;
@@ -3609,7 +3609,7 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.12s ease;
-    z-index: 100;
+    z-index: 300;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   }
 
