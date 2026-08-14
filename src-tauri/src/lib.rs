@@ -1626,6 +1626,31 @@ async fn execute_sql(
 }
 
 #[tauri::command]
+async fn check_update() -> Result<serde_json::Value, String> {
+    // 走 Rust 网络栈（ureq），避免 WebView 网络限制；GitHub API 匿名可读
+    let url = "https://api.github.com/repos/vpertj/tusk/releases/latest";
+    let resp = tokio::task::spawn_blocking(move || {
+        ureq::get(url)
+            .set("User-Agent", "tusk-desktop")
+            .set("Accept", "application/vnd.github+json")
+            .timeout(std::time::Duration::from_secs(10))
+            .call()
+            .map_err(|e| format!("检查更新失败: {e}"))?
+            .into_string()
+            .map_err(|e| format!("读取响应失败: {e}"))
+    })
+    .await
+    .map_err(|e| format!("检查更新失败: {e}"))??;
+    let v: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("解析响应失败: {e}"))?;
+    Ok(serde_json::json!({
+        "tag_name": v.get("tag_name").and_then(|t| t.as_str()).unwrap_or(""),
+        "body": v.get("body").and_then(|b| b.as_str()).unwrap_or(""),
+        "html_url": v.get("html_url").and_then(|u| u.as_str()).unwrap_or(""),
+    }))
+}
+
+#[tauri::command]
 async fn open_url(url: String) -> Result<(), String> {
     // macOS 系统默认浏览器打开（零依赖）
     std::process::Command::new("open")
@@ -3699,7 +3724,8 @@ pub fn run() {
             list_indexes,
             compare_schemas,
             execute_sql,
-            open_url
+            open_url,
+            check_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

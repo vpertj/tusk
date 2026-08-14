@@ -691,7 +691,6 @@
 
   // ===== 检查更新（GitHub Releases） =====
   const APP_VERSION = '1.0.0';
-  const UPDATE_URL = 'https://api.github.com/repos/vpertj/tusk/releases/latest';
   let updateInfo = $state<{ version: string; notes: string; url: string } | null>(null);
   let updateCheckMsg = $state('');
 
@@ -709,24 +708,22 @@
   async function checkUpdate(silent = false) {
     updateCheckMsg = '';
     try {
-      const res = await fetch(UPDATE_URL);
-      if (!res.ok) {
-        if (!silent) updateCheckMsg = `检查更新失败（HTTP ${res.status}）`;
-        return;
-      }
-      const rel = await res.json();
+      const rel = await invoke<{ tag_name: string; body: string; html_url: string }>(
+        'check_update',
+      );
       const latest = (rel.tag_name ?? '').replace(/^v/i, '');
       if (verCmp(latest, APP_VERSION) > 0) {
         updateInfo = {
           version: latest,
           notes: rel.body ?? '',
-          url: rel.html_url ?? `https://github.com/vpertj/tusk/releases/tag/v${latest}`,
+          url:
+            rel.html_url || `https://github.com/vpertj/tusk/releases/tag/v${latest}`,
         };
       } else if (!silent) {
         updateCheckMsg = `已是最新版本 v${APP_VERSION} ✅`;
       }
     } catch (e) {
-      if (!silent) updateCheckMsg = `检查更新失败: ${e}`;
+      if (!silent) updateCheckMsg = String(e);
     }
   }
 
