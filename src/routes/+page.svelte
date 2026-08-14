@@ -3151,10 +3151,10 @@
   .toolbar button.primary,
   .toolbar button.danger {
     width: auto;
-    padding: 5px 14px;
+    padding: 4px 11px;
     display: inline-flex;
     align-items: center;
-    font-size: 12px;
+    font-size: 11px;
   }
 
   .toolbar button svg {
