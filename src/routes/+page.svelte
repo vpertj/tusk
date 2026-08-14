@@ -1901,7 +1901,20 @@
       style={`width:${sidebarWidth}px`}
       oncontextmenu={openBlankMenu}
     >
-      <div class="sidebar-title">连接</div>
+      <div class="sidebar-title">
+        连接
+        <button
+          class="db-add-btn"
+          onclick={() => (showConnPanel = true)}
+          data-tip="新建连接"
+          aria-label="新建连接"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+        </button>
+      </div>
       {#if connNodes.length > 0}
         <div class="tree">
           {#each connNodes as c}
@@ -3308,6 +3321,8 @@
     padding: 8px 14px;
     background: #1e2128;
     border-bottom: 1px solid #2c303a;
+    position: relative;
+    z-index: 100;
   }
 
   .footer-logo {
@@ -3446,7 +3461,7 @@
   .toolbar button[data-tip]::after {
     content: attr(data-tip);
     position: absolute;
-    top: calc(100% + 12px);
+    top: calc(100% + 14px);
     left: 50%;
     transform: translateX(-50%);
     background: #262b36;
@@ -3459,7 +3474,7 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.12s ease;
-    z-index: 300;
+    z-index: 999;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   }
 
@@ -3817,7 +3832,7 @@
   .db-add-btn[data-tip]::after {
     content: attr(data-tip);
     position: absolute;
-    top: calc(100% + 12px);
+    top: calc(100% + 14px);
     left: 50%;
     transform: translateX(-50%);
     background: #262b36;
@@ -3830,7 +3845,7 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.12s ease;
-    z-index: 300;
+    z-index: 999;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   }
 
