@@ -1786,8 +1786,8 @@
   </header>
 
   <main>
-    <!-- ============ 连接管理弹窗（未连接时显示） ============ -->
-    {#if showConnPanel && !connId}
+    <!-- ============ 连接管理弹窗 ============ -->
+    {#if showConnPanel}
       <div class="overlay" role="presentation" onclick={() => (showConnPanel = false)}>
         <div
           class="conn-dialog"
