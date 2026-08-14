@@ -716,8 +716,11 @@
     status = `每页行数已设为 ${n}`;
   }
 
-  // ===== 结构同步（Navicat） =====
+  // ===== 结构/数据同步（Navicat） =====
   let showSync = $state(false);
+  let syncMode = $state<'schema' | 'schema_data'>('schema');
+  let syncSrcConn = $state('__current__');
+  let syncDstConn = $state('__current__');
   let syncSrc = $state('');
   let syncDst = $state('');
   let syncDiffs = $state<{ table: string; action: string; sql: string; checked: boolean }[]>([]);
@@ -732,15 +735,25 @@
     }
     syncSrc = dbs[0].name;
     syncDst = dbs[1].name;
+    syncSrcConn = '__current__';
+    syncDstConn = '__current__';
     syncDiffs = [];
     syncError = '';
     syncMsg = '';
+    syncMode = 'schema';
     showSync = true;
+  }
+
+  /** 解析连接选择：__current__ 用当前连接，否则按保存连接名一键连接并返回 connId */
+  async function resolveConn(sel: string): Promise<string> {
+    if (sel === '__current__') return connId;
+    const info = await invoke<{ id: string }>('connect_saved', { name: sel });
+    return info.id;
   }
 
   async function doCompare() {
     if (!syncSrc || !syncDst) return;
-    if (syncSrc === syncDst) {
+    if (syncSrc === syncDst && syncSrcConn === syncDstConn) {
       syncError = '源库与目标库不能相同';
       return;
     }
@@ -748,8 +761,11 @@
     syncError = '';
     syncMsg = '';
     try {
+      const srcId = await resolveConn(syncSrcConn);
+      const dstId = await resolveConn(syncDstConn);
       const diffs = await invoke<{ table: string; action: string; sql: string }[]>('compare_schemas', {
-        connId,
+        srcConnId: srcId,
+        dstConnId: dstId,
         srcDb: syncSrc,
         dstDb: syncDst,
       });
@@ -768,12 +784,27 @@
     syncError = '';
     syncMsg = '';
     try {
+      const srcId = await resolveConn(syncSrcConn);
+      const dstId = await resolveConn(syncDstConn);
       let ok = 0;
       for (const d of sel) {
-        await invoke('execute_sql', { connId, dbname: syncDst, sql: d.sql });
+        await invoke('execute_sql', { connId: dstId, dbname: syncDst, sql: d.sql });
         ok++;
       }
-      syncMsg = `✅ 已执行 ${ok} 项差异，目标库结构已同步`;
+      if (syncMode === 'schema_data') {
+        // 结构+数据：COPY 流式同步勾选表的数据（全量覆盖目标表）
+        const tables = sel.map((d) => d.table);
+        const [synced, rows] = await invoke<[number, number]>('sync_data', {
+          srcConnId: srcId,
+          dstConnId: dstId,
+          srcDb: syncSrc,
+          dstDb: syncDst,
+          tables,
+        });
+        syncMsg = `✅ 结构 ${ok} 项 + 数据 ${synced} 表 ${rows} 行已同步`;
+      } else {
+        syncMsg = `✅ 已执行 ${ok} 项差异，目标库结构已同步`;
+      }
       syncDiffs = [];
       // 清目标库表缓存，强制树重新加载（否则显示旧数据）
       delete tables[syncDst];
@@ -2437,10 +2468,40 @@
         onkeydown={(e) => e.key === 'Escape' && (showSync = false)}
       >
         <div class="dialog-head">
-          <span class="dialog-title">⇄ 结构同步</span>
+          <span class="dialog-title">⇄ 同步{syncMode === 'schema_data' ? '结构和数据' : '结构'}</span>
           <button class="dialog-close" onclick={() => (showSync = false)}>×</button>
         </div>
         <div class="dialog-body">
+          <!-- 同步模式 -->
+          <div class="sync-mode">
+            <button class="sync-mode-btn" class:active={syncMode === 'schema'} onclick={() => (syncMode = 'schema')}>
+              仅同步结构
+            </button>
+            <button class="sync-mode-btn" class:active={syncMode === 'schema_data'} onclick={() => (syncMode = 'schema_data')}>
+              结构和数据
+            </button>
+          </div>
+          <div class="sync-pair">
+            <div class="field">
+              <label for="s-src-conn">源连接</label>
+              <select id="s-src-conn" bind:value={syncSrcConn}>
+                <option value="__current__">当前连接</option>
+                {#each savedConns as sc (sc.name)}
+                  <option value={sc.name}>{sc.name}</option>
+                {/each}
+              </select>
+            </div>
+            <div class="sync-arrow">→</div>
+            <div class="field">
+              <label for="s-dst-conn">目标连接</label>
+              <select id="s-dst-conn" bind:value={syncDstConn}>
+                <option value="__current__">当前连接</option>
+                {#each savedConns as sc (sc.name)}
+                  <option value={sc.name}>{sc.name}</option>
+                {/each}
+              </select>
+            </div>
+          </div>
           <div class="sync-pair">
             <div class="field">
               <label for="s-src">源数据库</label>
@@ -2460,9 +2521,12 @@
               </select>
             </div>
           </div>
+          {#if syncMode === 'schema_data'}
+            <div class="sync-hint">结构和数据：目标表数据将被源表全量覆盖（清空后灌入源数据）</div>
+          {/if}
           <div class="field-actions" style="margin: 10px 0">
             <button onclick={doCompare} disabled={syncBusy}>
-              {syncBusy ? '比较中…' : '🔍 比较结构'}
+              {syncBusy ? '比较中…' : `🔍 比较${syncMode === 'schema_data' ? '结构和数据' : '结构'}`}
             </button>
           </div>
           {#if syncError}
@@ -3803,7 +3867,42 @@
 
   /* 结构同步弹窗 */
   .sync-dialog {
-    width: 680px;
+    width: 620px;
+  }
+
+  /* 同步模式切换 */
+  .sync-mode {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .sync-mode-btn {
+    flex: 1;
+    padding: 7px 0;
+    border-radius: 6px;
+    font-size: 12px;
+    border: 1px solid #2c303a;
+    background: transparent;
+    color: #9aa3b2;
+    cursor: pointer;
+  }
+
+  .sync-mode-btn:hover {
+    background: #262b36;
+    color: #f0f2f5;
+  }
+
+  .sync-mode-btn.active {
+    background: #1d3a6b;
+    border-color: #2f6fed;
+    color: #8ab4ff;
+  }
+
+  .sync-hint {
+    margin: 8px 0 0;
+    font-size: 11px;
+    color: #c9a227;
   }
 
   .sync-pair {

@@ -1545,15 +1545,16 @@ fn diff_columns_sql(table: &str, src: &[SchemaColumn], dst: &[SchemaColumn]) -> 
 
 /// 核心：比较 src_db 与 dst_db 的结构差异（Navicat 结构同步）
 async fn compare_schemas_core(
-    cfg: &ConnConfig,
+    src_cfg: &ConnConfig,
+    dst_cfg: &ConnConfig,
     src_db: &str,
     dst_db: &str,
 ) -> Result<Vec<SchemaDiff>, String> {
     if src_db == dst_db {
         return Err("源库与目标库不能相同".into());
     }
-    let src_tables = list_tables_core(cfg, src_db).await?;
-    let dst_tables = list_tables_core(cfg, dst_db).await?;
+    let src_tables = list_tables_core(src_cfg, src_db).await?;
+    let dst_tables = list_tables_core(dst_cfg, dst_db).await?;
     let mut diffs: Vec<SchemaDiff> = Vec::new();
 
     for st in &src_tables {
@@ -1563,7 +1564,7 @@ async fn compare_schemas_core(
         match dst_tables.iter().find(|t| t.name == st.name) {
             None => {
                 // 新建表
-                let cols = list_columns_core(cfg, src_db, &st.name).await?;
+                let cols = list_columns_core(src_cfg, src_db, &st.name).await?;
                 let col_defs = schema_cols_to_defs(&cols);
                 let mut sql = build_create_table_sql(&st.name, &col_defs)?;
                 let comment_stmts = comment_statements(&quote_ident(&st.name), None, &col_defs);
@@ -1579,14 +1580,14 @@ async fn compare_schemas_core(
             }
             Some(dt) => {
                 // 修改表：列级 diff + 主键
-                let src_cols = list_columns_core(cfg, src_db, &st.name).await?;
-                let dst_cols = list_columns_core(cfg, dst_db, &dt.name).await?;
+                let src_cols = list_columns_core(src_cfg, src_db, &st.name).await?;
+                let dst_cols = list_columns_core(dst_cfg, dst_db, &dt.name).await?;
                 let mut substmts = diff_columns_sql(&st.name, &src_cols, &dst_cols);
                 // 主键 drop（需要查 dst 的约束名）
                 let src_pk: Vec<&str> = src_cols.iter().filter(|c| c.is_pk).map(|c| c.name.as_str()).collect();
                 let dst_pk: Vec<&str> = dst_cols.iter().filter(|c| c.is_pk).map(|c| c.name.as_str()).collect();
                 if src_pk != dst_pk && !dst_pk.is_empty() {
-                    let mut c = cfg.clone();
+                    let mut c = dst_cfg.clone();
                     c.dbname = dst_db.to_string();
                     let (client, _) = open_connection(&c).await?;
                     let tbl_lit = format!("\"{}\"", dt.name.replace('"', "\"\""));
@@ -1651,6 +1652,119 @@ async fn execute_sql(
         .await
         .map_err(|e| format!("执行失败: {e}"))?;
     Ok("执行成功".to_string())
+}
+
+/// 核心：同步表数据（COPY 流式，源/目标可跨连接）
+async fn sync_data_core(
+    src_cfg: &ConnConfig,
+    dst_cfg: &ConnConfig,
+    src_db: &str,
+    dst_db: &str,
+    tables: &[String],
+) -> Result<(usize, usize), String> {
+    let mut sc = src_cfg.clone();
+    sc.dbname = src_db.to_string();
+    let mut dc = dst_cfg.clone();
+    dc.dbname = dst_db.to_string();
+    let (src_client, _) = open_connection(&sc).await?;
+    let (dst_client, _) = open_connection(&dc).await?;
+
+    let mut total_rows = 0usize;
+    let mut synced_tables = 0usize;
+    for t in tables {
+        // 列列表（按序号）
+        let cols: Vec<String> = src_client
+            .query(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position",
+                &[t],
+            )
+            .await
+            .map_err(|e| format!("读取列失败 {t}: {e}"))?
+            .iter()
+            .map(|r| r.get::<_, String>(0))
+            .collect();
+        if cols.is_empty() {
+            continue;
+        }
+        let col_sql = cols
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // 源表行数（统计用）
+        let cnt: i64 = src_client
+            .query_one(&format!("SELECT count(*) FROM {}", quote_ident(t)), &[])
+            .await
+            .map_err(|e| format!("统计行数失败 {t}: {e}"))?
+            .get(0);
+        // 清空目标表
+        dst_client
+            .execute(&format!("TRUNCATE {}", quote_ident(t)), &[])
+            .await
+            .map_err(|e| format!("清空目标表 {t} 失败: {e}"))?;
+        // 源 COPY OUT → 目标 COPY IN 流式传输
+        let copy_out_sql = format!(
+            "COPY {} ({}) TO STDOUT WITH (FORMAT csv)",
+            quote_ident(t),
+            col_sql
+        );
+        let mut reader = Box::pin(
+            src_client
+                .copy_out(&copy_out_sql)
+                .await
+                .map_err(|e| format!("读取源数据 {t} 失败: {e}"))?,
+        );
+        let copy_in_sql = format!(
+            "COPY {} ({}) FROM STDIN WITH (FORMAT csv)",
+            quote_ident(t),
+            col_sql
+        );
+        let mut sink = Box::pin(
+            dst_client
+                .copy_in(&copy_in_sql)
+                .await
+                .map_err(|e| format!("写入目标数据 {t} 失败: {e}"))?,
+        );
+        use futures::{SinkExt, StreamExt};
+        while let Some(chunk) = reader.as_mut().next().await {
+            let chunk = chunk.map_err(|e| format!("读取源数据流失败 {t}: {e}"))?;
+            sink.as_mut()
+                .send(chunk)
+                .await
+                .map_err(|e| format!("写入目标数据流失败 {t}: {e}"))?;
+        }
+        let inner_sink = sink.as_mut();
+        inner_sink
+            .finish()
+            .await
+            .map_err(|e| format!("完成写入 {t} 失败: {e}"))?;
+        total_rows += cnt as usize;
+        synced_tables += 1;
+    }
+    Ok((synced_tables, total_rows))
+}
+
+/// 同步数据（Tauri command：源/目标连接可不同）
+#[tauri::command]
+async fn sync_data(
+    state: State<'_, AppState>,
+    src_conn_id: String,
+    dst_conn_id: String,
+    src_db: String,
+    dst_db: String,
+    tables: Vec<String>,
+) -> Result<(usize, usize), String> {
+    let conns = state.conns.lock().await;
+    let src_cfg = conns
+        .get(&src_conn_id)
+        .map(|e| e.cfg.clone())
+        .ok_or("源连接不存在或已断开")?;
+    let dst_cfg = conns
+        .get(&dst_conn_id)
+        .map(|e| e.cfg.clone())
+        .ok_or("目标连接不存在或已断开")?;
+    drop(conns);
+    sync_data_core(&src_cfg, &dst_cfg, &src_db, &dst_db, &tables).await
 }
 
 #[tauri::command]
@@ -1894,15 +2008,22 @@ async fn drop_database(
 #[tauri::command]
 async fn compare_schemas(
     state: State<'_, AppState>,
-    conn_id: String,
+    src_conn_id: String,
+    dst_conn_id: String,
     src_db: String,
     dst_db: String,
 ) -> Result<Vec<SchemaDiff>, String> {
-    let cfg = {
-        let conns = state.conns.lock().await;
-        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
-    };
-    compare_schemas_core(&cfg, &src_db, &dst_db).await
+    let conns = state.conns.lock().await;
+    let src_cfg = conns
+        .get(&src_conn_id)
+        .map(|e| e.cfg.clone())
+        .ok_or("源连接不存在或已断开")?;
+    let dst_cfg = conns
+        .get(&dst_conn_id)
+        .map(|e| e.cfg.clone())
+        .ok_or("目标连接不存在或已断开")?;
+    drop(conns);
+    compare_schemas_core(&src_cfg, &dst_cfg, &src_db, &dst_db).await
 }
 
 /// 核心：DROP TABLE
@@ -3895,7 +4016,7 @@ mod tests {
         ], None).await.expect("B.t3 建表失败");
 
         // 比较 A → B
-        let diffs = compare_schemas_core(&cfg, &a, &b).await.expect("比较失败");
+        let diffs = compare_schemas_core(&cfg, &cfg, &a, &b).await.expect("比较失败");
         // t2 新建、t1 修改、t3 删除
         let names: Vec<String> = diffs.iter().map(|d| d.table.clone()).collect();
         assert!(diffs.iter().any(|d| d.table == "t2" && d.action == "create"), "t2 应新建: {names:?}");
@@ -3911,7 +4032,7 @@ mod tests {
         }
 
         // 再次比较应为空（结构一致）
-        let diffs2 = compare_schemas_core(&cfg, &a, &b).await.expect("比较2失败");
+        let diffs2 = compare_schemas_core(&cfg, &cfg, &a, &b).await.expect("比较2失败");
         assert!(diffs2.is_empty(), "同步后应无差异: {:?}", diffs2.iter().map(|d| (&d.table, &d.action)).collect::<Vec<_>>());
 
         admin.execute(&format!("DROP DATABASE IF EXISTS \"{a}\" WITH (FORCE)"), &[]).await.ok();
@@ -3960,6 +4081,44 @@ mod tests {
         let err2 = drop_database_core(&cfg, "x; DROP DATABASE y").await.expect_err("非法名应拒绝");
         assert!(err2.contains("只能包含"), "错误: {err2}");
     }
+
+    #[tokio::test]
+    async fn test_sync_data() {
+        let cfg = test_cfg();
+        let pid = std::process::id();
+        let src = format!("tusk_sd_src_{pid}");
+        let dst = format!("tusk_sd_dst_{pid}");
+        let admin = open_connection(&cfg).await.unwrap().0;
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{src}\" WITH (FORCE)"), &[]).await.unwrap();
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{dst}\" WITH (FORCE)"), &[]).await.unwrap();
+        admin.execute(&format!("CREATE DATABASE \"{src}\""), &[]).await.unwrap();
+        admin.execute(&format!("CREATE DATABASE \"{dst}\""), &[]).await.unwrap();
+        // 源库建表 + 插数据
+        let (src_c, _) = open_connection(&ConnConfig { host: cfg.host.clone(), port: cfg.port, user: cfg.user.clone(), password: cfg.password.clone(), dbname: src.clone() }).await.unwrap();
+        src_c.execute("CREATE TABLE t1 (id serial primary key, name text, price numeric(10,2))", &[]).await.unwrap();
+        src_c.execute("INSERT INTO t1 (name, price) VALUES ('a', 1.5), ('b', 2.75), ('c', NULL)", &[]).await.unwrap();
+        src_c.execute("CREATE TABLE t2 (id int primary key, note text)", &[]).await.unwrap();
+        src_c.execute("INSERT INTO t2 VALUES (1, 'x'), (2, 'y')", &[]).await.unwrap();
+        // 目标库建同结构空表
+        let (dst_c, _) = open_connection(&ConnConfig { host: cfg.host.clone(), port: cfg.port, user: cfg.user.clone(), password: cfg.password.clone(), dbname: dst.clone() }).await.unwrap();
+        dst_c.execute("CREATE TABLE t1 (id serial primary key, name text, price numeric(10,2))", &[]).await.unwrap();
+        dst_c.execute("CREATE TABLE t2 (id int primary key, note text)", &[]).await.unwrap();
+        // 同步数据
+        let (tables, rows) = sync_data_core(&cfg, &cfg, &src, &dst, &["t1".to_string(), "t2".to_string()]).await.unwrap();
+        assert_eq!(tables, 2, "应同步 2 张表");
+        assert_eq!(rows, 5, "应同步 5 行数据");
+        // 验证目标数据
+        let c1: i64 = dst_c.query_one("SELECT count(*) FROM t1", &[]).await.unwrap().get(0);
+        let c2: i64 = dst_c.query_one("SELECT count(*) FROM t2", &[]).await.unwrap().get(0);
+        assert_eq!((c1, c2), (3, 2), "目标库应有 3+2 行");
+        let n: Option<String> = dst_c.query_one("SELECT name FROM t1 WHERE id = 1", &[]).await.unwrap().get(0);
+        assert_eq!(n.as_deref(), Some("a"));
+        let p: f64 = dst_c.query_one("SELECT price::float8 FROM t1 WHERE id = 2", &[]).await.unwrap().get(0);
+        assert_eq!(p, 2.75);
+        // 清理
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{src}\" WITH (FORCE)"), &[]).await.unwrap();
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{dst}\" WITH (FORCE)"), &[]).await.unwrap();
+    }
 }
 
 pub fn run() {
@@ -3997,6 +4156,7 @@ pub fn run() {
             list_indexes,
             compare_schemas,
             execute_sql,
+            sync_data,
             open_url,
             check_update,
             download_update,
