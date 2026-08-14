@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use tauri::Emitter;
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, Row};
 use tokio_postgres::types::ToSql;
@@ -1643,11 +1644,130 @@ async fn check_update() -> Result<serde_json::Value, String> {
     .map_err(|e| format!("检查更新失败: {e}"))??;
     let v: serde_json::Value =
         serde_json::from_str(&resp).map_err(|e| format!("解析响应失败: {e}"))?;
+    // 找 .dmg 资产下载地址
+    let mut asset_url = "";
+    if let Some(assets) = v.get("assets").and_then(|a| a.as_array()) {
+        for a in assets {
+            if let Some(name) = a.get("name").and_then(|n| n.as_str()) {
+                if name.ends_with(".dmg") {
+                    if let Some(u) = a.get("browser_download_url").and_then(|u| u.as_str()) {
+                        asset_url = u;
+                        break;
+                    }
+                }
+            }
+        }
+    }
     Ok(serde_json::json!({
         "tag_name": v.get("tag_name").and_then(|t| t.as_str()).unwrap_or(""),
         "body": v.get("body").and_then(|b| b.as_str()).unwrap_or(""),
         "html_url": v.get("html_url").and_then(|u| u.as_str()).unwrap_or(""),
+        "asset_url": asset_url,
     }))
+}
+
+/// 下载更新包（流式 + 进度事件）
+#[tauri::command]
+async fn download_update(
+    app: tauri::AppHandle,
+    url: String,
+    target: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let resp = ureq::get(&url)
+            .set("User-Agent", "tusk-desktop")
+            .timeout(std::time::Duration::from_secs(600))
+            .call()
+            .map_err(|e| format!("下载失败: {e}"))?;
+        let total: u64 = resp
+            .header("Content-Length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut reader = resp.into_reader();
+        let mut file = std::fs::File::create(&target).map_err(|e| format!("创建文件失败: {e}"))?;
+        use std::io::{Read, Write};
+        let mut buf = [0u8; 65536];
+        let mut done: u64 = 0;
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| format!("读取下载流失败: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(|e| format!("写入文件失败: {e}"))?;
+            done += n as u64;
+            let pct = if total > 0 { (done * 100 / total) as u32 } else { 0 };
+            let _ = app.emit(
+                "update-progress",
+                serde_json::json!({ "percent": pct, "downloaded": done, "total": total }),
+            );
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("下载任务失败: {e}"))?
+}
+
+/// 安装更新：挂载 dmg → 替换 /Applications/Tusk.app → 重启
+#[tauri::command]
+async fn install_update(dmg_path: String) -> Result<(), String> {
+    use std::process::Command;
+
+    // 1. 挂载 dmg
+    let mount = Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-readonly", &dmg_path])
+        .output()
+        .map_err(|e| format!("hdiutil 执行失败: {e}"))?;
+    if !mount.status.success() {
+        return Err(format!(
+            "挂载 dmg 失败: {}",
+            String::from_utf8_lossy(&mount.stderr).trim()
+        ));
+    }
+    let mount_out = String::from_utf8_lossy(&mount.stdout);
+    // 提取挂载点（最后一个 /Volumes/... 路径）
+    let vol = mount_out
+        .split_whitespace()
+        .rev()
+        .find(|s| s.starts_with("/Volumes/"))
+        .ok_or("无法定位 dmg 挂载点")?
+        .to_string();
+    let app_src = format!("{vol}/Tusk.app");
+
+    // 2. 替换 /Applications/Tusk.app（先删旧的）
+    let apps_dst = "/Applications/Tusk.app";
+    let _ = Command::new("rm").args(["-rf", apps_dst]).output();
+    let cp = Command::new("cp")
+        .args(["-R", &app_src, apps_dst])
+        .output()
+        .map_err(|e| format!("cp 执行失败: {e}"))?;
+    if !cp.status.success() {
+        let _ = Command::new("hdiutil").args(["detach", &vol]).output();
+        return Err(format!(
+            "复制应用到 /Applications 失败: {}",
+            String::from_utf8_lossy(&cp.stderr).trim()
+        ));
+    }
+
+    // 3. 卸载 dmg
+    let _ = Command::new("hdiutil").args(["detach", &vol]).output();
+
+    // 4. 删除已下载的 dmg
+    let _ = std::fs::remove_file(&dmg_path);
+
+    // 5. 重启应用（延迟 500ms 让 command 返回）
+    let exe = std::env::current_exe().map_err(|e| format!("定位自身路径失败: {e}"))?;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let _ = Command::new(exe).spawn();
+    });
+    std::process::exit(0);
+}
+
+#[tauri::command]
+fn get_download_dir() -> String {
+    std::env::var("HOME")
+        .map(|h| format!("{h}/Downloads"))
+        .unwrap_or_else(|_| "~/Downloads".into())
 }
 
 #[tauri::command]
@@ -3852,6 +3972,9 @@ pub fn run() {
             execute_sql,
             open_url,
             check_update,
+            download_update,
+            install_update,
+            get_download_dir,
             create_database,
             drop_database
         ])

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { format as formatSql } from 'sql-formatter';
   import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 
@@ -777,10 +778,17 @@
     syncBusy = false;
   }
 
-  // ===== 检查更新（GitHub Releases） =====
-  const APP_VERSION = '1.0.0';
-  let updateInfo = $state<{ version: string; notes: string; url: string } | null>(null);
+  // ===== 检查更新（GitHub Releases + 自动下载安装） =====
+  const APP_VERSION = '1.0.2';
+  let updateInfo = $state<{
+    version: string;
+    notes: string;
+    url: string;
+    assetUrl: string;
+  } | null>(null);
   let updateCheckMsg = $state('');
+  let updateBusy = $state(false);
+  let updatePercent = $state(0);
 
   function verCmp(a: string, b: string): number {
     const pa = a.replace(/^v/i, '').split('.').map(Number);
@@ -796,16 +804,19 @@
   async function checkUpdate(silent = false) {
     updateCheckMsg = '';
     try {
-      const rel = await invoke<{ tag_name: string; body: string; html_url: string }>(
-        'check_update',
-      );
+      const rel = await invoke<{
+        tag_name: string;
+        body: string;
+        html_url: string;
+        asset_url: string;
+      }>('check_update');
       const latest = (rel.tag_name ?? '').replace(/^v/i, '');
       if (verCmp(latest, APP_VERSION) > 0) {
         updateInfo = {
           version: latest,
           notes: rel.body ?? '',
-          url:
-            rel.html_url || `https://github.com/vpertj/tusk/releases/tag/v${latest}`,
+          url: rel.html_url || `https://github.com/vpertj/tusk/releases/tag/v${latest}`,
+          assetUrl: rel.asset_url ?? '',
         };
       } else if (!silent) {
         updateCheckMsg = `已是最新版本 v${APP_VERSION} ✅`;
@@ -815,10 +826,31 @@
     }
   }
 
-  async function doOpenUpdate() {
-    if (!updateInfo) return;
-    await invoke('open_url', { url: updateInfo.url });
-    updateInfo = null;
+  /** 下载并安装更新：下载 → 进度 → 安装 → 自动重启 */
+  async function doUpdate() {
+    const info = updateInfo;
+    if (!info || updateBusy) return;
+    if (!info.assetUrl) {
+      updateCheckMsg = '更新包地址不可用，请手动前往 GitHub 下载';
+      return;
+    }
+    updateBusy = true;
+    updatePercent = 0;
+    updateCheckMsg = '';
+    const unlisten = await listen<{ percent: number }>('update-progress', (e) => {
+      updatePercent = e.payload.percent ?? 0;
+    });
+    try {
+      const target = `${await invoke<string>('get_download_dir')}/tusk-update.dmg`;
+      await invoke('download_update', { url: info.assetUrl, target });
+      updateCheckMsg = '下载完成，正在安装…';
+      // 安装后应用会自动重启
+      await invoke('install_update', { dmgPath: target });
+    } catch (e) {
+      updateCheckMsg = `更新失败: ${e}`;
+      updateBusy = false;
+    }
+    unlisten();
   }
 
   // 启动 5 秒后静默检查一次
@@ -2502,9 +2534,22 @@
             </div>
           {/if}
           <div class="field-actions" style="margin-top: 18px">
-            <button onclick={() => (updateInfo = null)}>稍后再说</button>
-            <button onclick={doOpenUpdate} class="primary">⬇ 前往下载</button>
+            {#if updateBusy}
+              <div class="update-progress">
+                <div class="update-bar">
+                  <div class="update-bar-fill" style={`width:${updatePercent}%`}></div>
+                </div>
+                <span class="update-pct">{updatePercent}%</span>
+              </div>
+              <div class="update-msg">{updateCheckMsg || '正在下载更新包…'}</div>
+            {:else}
+              <button onclick={() => (updateInfo = null)}>稍后再说</button>
+              <button onclick={doUpdate} class="primary">⬇ 下载并安装</button>
+            {/if}
           </div>
+          {#if !updateBusy && updateCheckMsg}
+            <div class="update-msg">{updateCheckMsg}</div>
+          {/if}
         </div>
       </div>
     </div>
@@ -3940,6 +3985,37 @@
     font-size: 11px;
     color: #5c6472;
     margin-bottom: 10px;
+  }
+
+  /* 更新进度条 */
+  .update-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+  }
+
+  .update-bar {
+    flex: 1;
+    height: 6px;
+    background: #14171d;
+    border: 1px solid #2c303a;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .update-bar-fill {
+    height: 100%;
+    background: #2f6fed;
+    border-radius: 3px;
+    transition: width 0.15s ease;
+  }
+
+  .update-pct {
+    color: #8b93a3;
+    font-size: 12px;
+    min-width: 38px;
+    text-align: right;
   }
 
   /* 对象搜索弹窗 */
