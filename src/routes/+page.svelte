@@ -599,6 +599,7 @@
 
   // ===== 设置（每页行数等，localStorage 持久化） =====
   let showSettings = $state(false);
+  let settingsTab = $state<'general' | 'update' | 'about'>('general');
   let settingsPageSize = $state(50);
   try {
     settingsPageSize = Number(localStorage.getItem('tusk.pageSize')) || 50;
@@ -608,6 +609,7 @@
 
   function openSettings() {
     settingsPageSize = Number(localStorage.getItem('tusk.pageSize')) || 50;
+    settingsTab = 'general';
     showSettings = true;
   }
 
@@ -2370,7 +2372,7 @@
     </div>
   {/if}
 
-  <!-- ============ 设置弹窗 ============ -->
+  <!-- ============ 设置弹窗（左右分栏） ============ -->
   {#if showSettings}
     <div class="overlay" role="presentation" onclick={() => (showSettings = false)}>
       <div
@@ -2385,24 +2387,80 @@
           <span class="dialog-title">⚙ 设置</span>
           <button class="dialog-close" onclick={() => (showSettings = false)}>×</button>
         </div>
-        <div class="dialog-body">
-          <div class="field">
-            <label for="s-ps">数据页每页行数（10-500）</label>
-            <input id="s-ps" type="number" min="10" max="500" bind:value={settingsPageSize} />
-          </div>
-          <div class="field" style="margin-top: 14px">
-            <label for="s-update">检查更新</label>
-            <div class="update-row">
-              <span class="ver-tag">当前 v{APP_VERSION}</span>
-              <button onclick={() => checkUpdate(false)}>🔍 检查更新</button>
-            </div>
-            {#if updateCheckMsg}
-              <div class="update-msg">{updateCheckMsg}</div>
+        <div class="settings-body">
+          <!-- 左栏：分类导航 -->
+          <nav class="settings-nav" aria-label="设置分类">
+            <button
+              class="settings-item"
+              class:active={settingsTab === 'general'}
+              onclick={() => (settingsTab = 'general')}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M12 1v3M12 20v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M1 12h3M20 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" />
+              </svg>
+              常规
+            </button>
+            <button
+              class="settings-item"
+              class:active={settingsTab === 'update'}
+              onclick={() => (settingsTab = 'update')}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+              更新
+            </button>
+            <button
+              class="settings-item"
+              class:active={settingsTab === 'about'}
+              onclick={() => (settingsTab = 'about')}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="16" x2="12" y2="12" />
+                <line x1="12" y1="8" x2="12.01" y2="8" />
+              </svg>
+              关于
+            </button>
+          </nav>
+          <!-- 右栏：内容区 -->
+          <div class="settings-content">
+            {#if settingsTab === 'general'}
+              <div class="settings-title">常规</div>
+              <div class="field">
+                <label for="s-ps">数据页每页行数（10-500）</label>
+                <input id="s-ps" type="number" min="10" max="500" bind:value={settingsPageSize} />
+              </div>
+              <div class="field-actions" style="margin-top:24px">
+                <button onclick={saveSettings} class="primary">保存</button>
+              </div>
+            {:else if settingsTab === 'update'}
+              <div class="settings-title">更新</div>
+              <div class="field">
+                <label for="s-update">检查更新</label>
+                <div class="update-row">
+                  <span class="ver-tag">当前 v{APP_VERSION}</span>
+                  <button onclick={() => checkUpdate(false)}>🔍 检查更新</button>
+                </div>
+                {#if updateCheckMsg}
+                  <div class="update-msg">{updateCheckMsg}</div>
+                {/if}
+              </div>
+            {:else}
+              <div class="settings-title">关于</div>
+              <div class="about-box">
+                <img src="/tusk-icon.png" class="about-logo" alt="Tusk" />
+                <div class="about-name">Tusk v{APP_VERSION}</div>
+                <div class="about-desc">PostgreSQL 管理客户端</div>
+                <div class="about-stack">Tauri 2 · Rust · Svelte 5</div>
+                <button onclick={() => invoke('open_url', { url: 'https://github.com/vpertj/tusk' })}>
+                  GitHub 仓库 ↗
+                </button>
+              </div>
             {/if}
-          </div>
-          <div class="field-actions" style="margin-top:18px">
-            <button onclick={() => (showSettings = false)}>取消</button>
-            <button onclick={saveSettings} class="primary">保存</button>
           </div>
         </div>
       </div>
@@ -3494,6 +3552,104 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* 设置弹窗（左右分栏） */
+  .settings-dialog {
+    width: 560px;
+  }
+
+  .settings-body {
+    display: flex;
+    min-height: 300px;
+  }
+
+  .settings-nav {
+    width: 150px;
+    flex-shrink: 0;
+    border-right: 1px solid #2c303a;
+    padding: 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .settings-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: #aab2c0;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .settings-item svg {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+  }
+
+  .settings-item:hover {
+    background: #232833;
+    color: #e8ebf0;
+  }
+
+  .settings-item.active {
+    background: #2a3345;
+    color: #4fc3f7;
+    font-weight: 600;
+  }
+
+  .settings-content {
+    flex: 1;
+    padding: 18px 22px;
+    min-width: 0;
+  }
+
+  .settings-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #e8ebf0;
+    margin-bottom: 18px;
+  }
+
+  /* 关于页 */
+  .about-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 0;
+  }
+
+  .about-logo {
+    width: 64px;
+    height: 64px;
+    border-radius: 14px;
+    margin-bottom: 6px;
+  }
+
+  .about-name {
+    font-size: 16px;
+    font-weight: 700;
+    color: #e8ebf0;
+  }
+
+  .about-desc {
+    font-size: 13px;
+    color: #8b93a3;
+  }
+
+  .about-stack {
+    font-size: 11px;
+    color: #5c6472;
+    margin-bottom: 10px;
   }
 
   /* 对象搜索弹窗 */
