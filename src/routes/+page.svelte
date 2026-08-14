@@ -2253,6 +2253,7 @@
         aria-label="发现新版本"
         tabindex="-1"
         onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (updateInfo = null)}
       >
         <div class="dialog-head">
           <span class="dialog-title">🚀 发现新版本 v{updateInfo.version}</span>
@@ -2299,7 +2300,7 @@
             <input id="s-ps" type="number" min="10" max="500" bind:value={settingsPageSize} />
           </div>
           <div class="field" style="margin-top: 14px">
-            <label>检查更新</label>
+            <label for="s-update">检查更新</label>
             <div class="update-row">
               <span class="ver-tag">当前 v{APP_VERSION}</span>
               <button onclick={() => checkUpdate(false)}>🔍 检查更新</button>
