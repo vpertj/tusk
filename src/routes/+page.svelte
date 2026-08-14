@@ -355,14 +355,11 @@
     if (!t.dbname || !t.table) return;
     t.loading = true;
     try {
-      const sql = await invoke<string>('export_sql', {
+      const path = await invoke<string>('export_sql', {
         connId,
         dbname: t.dbname,
         table: t.table,
       });
-      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const path = `~/Downloads/tusk-${t.table}-${ts}.sql`;
-      await invoke('write_text_file', { path, content: sql });
       t.message = `已导出 SQL → ${path}`;
     } catch (e) {
       t.error = String(e);
@@ -507,10 +504,7 @@
   async function exportTableSqlFromTree(db: string, table: string) {
     tableMenu = null;
     try {
-      const sql = await invoke<string>('export_sql', { connId, dbname: db, table });
-      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const path = `~/Downloads/tusk-${table}-${ts}.sql`;
-      await invoke('write_text_file', { path, content: sql });
+      const path = await invoke<string>('export_sql', { connId, dbname: db, table });
       status = `已导出 SQL → ${path}`;
     } catch (e) {
       status = `导出失败: ${e}`;

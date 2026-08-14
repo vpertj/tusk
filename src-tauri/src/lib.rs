@@ -2485,7 +2485,7 @@ async fn insert_row_vals(
     insert_row_vals_core(&cfg, &dbname, &table, values).await
 }
 
-/// 导出表数据为 SQL（INSERT 语句），值统一转义为字符串字面量
+/// 导出表数据为 SQL 文件（流式：ctid 分页查询 + 分批 INSERT 直接写盘，内存恒定，千万行可导）
 async fn export_sql_core(cfg: &ConnConfig, dbname: &str, table: &str) -> Result<String, String> {
     let mut c = cfg.clone();
     c.dbname = dbname.to_string();
@@ -2496,53 +2496,66 @@ async fn export_sql_core(cfg: &ConnConfig, dbname: &str, table: &str) -> Result<
     let cols = list_columns_core(cfg, dbname, table).await?;
     let col_names: Vec<String> = cols.iter().map(|x| quote_ident(&x.name)).collect();
 
-    // 全部数据
-    let rows = client
-        .query(&format!("SELECT * FROM {qtable}"), &[])
-        .await
-        .map_err(|e| format!("查询失败: {e}"))?;
+    // 输出文件：~/Downloads/tusk-<表>-<时间戳>.sql
+    let ts = now_str().replace([':', ' '], "-");
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let path = format!("{home}/Downloads/tusk-{table}-{ts}.sql");
+    let mut file = std::fs::File::create(&path).map_err(|e| format!("创建文件失败: {e}"))?;
+    use std::io::Write;
+    writeln!(file, "-- 表数据导出: {table}").map_err(|e| format!("写入失败: {e}"))?;
+    writeln!(file, "-- 生成时间: {}", now_str()).map_err(|e| format!("写入失败: {e}"))?;
+    writeln!(file).map_err(|e| format!("写入失败: {e}"))?;
+    writeln!(file, "TRUNCATE {qtable};").map_err(|e| format!("写入失败: {e}"))?;
+    writeln!(file).map_err(|e| format!("写入失败: {e}"))?;
 
-    let mut out = String::new();
-    out.push_str(&format!("-- 表数据导出: {table}\\n-- 生成时间: {}\\n\\n", now_str()));
-    out.push_str(&format!("TRUNCATE {qtable};\\n\\n"));
-
-    let mut buf: Vec<String> = Vec::new();
-    for r in &rows {
-        let row_vals = row_to_json(r);
-        let vals: Vec<String> = row_vals
-            .iter()
-            .map(|jv| {
-                if jv.is_null() {
-                    "NULL".to_string()
-                } else {
-                    let s = match jv {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Bool(b) => b.to_string(),
-                        serde_json::Value::Number(n) => n.to_string(),
-                        _ => jv.to_string(),
-                    };
-                    format!("'{}'", s.replace('\'', "''"))
-                }
-            })
-            .collect();
-        buf.push(format!("({})", vals.join(", ")));
-        if buf.len() >= 500 {
-            out.push_str(&format!(
-                "INSERT INTO {qtable} ({}) VALUES\\n{};\\n",
-                col_names.join(", "),
-                buf.join(",\\n")
-            ));
-            buf.clear();
+    // 流式分页（ORDER BY ctid = 物理顺序，无需主键）
+    const BATCH: i64 = 500;
+    let mut offset: i64 = 0;
+    loop {
+        let rows = client
+            .query(
+                &format!("SELECT * FROM {qtable} ORDER BY ctid LIMIT {BATCH} OFFSET {offset}"),
+                &[],
+            )
+            .await
+            .map_err(|e| format!("查询失败: {e}"))?;
+        if rows.is_empty() {
+            break;
         }
-    }
-    if !buf.is_empty() {
-        out.push_str(&format!(
-            "INSERT INTO {qtable} ({}) VALUES\\n{};\\n",
+        let mut buf: Vec<String> = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let row_vals = row_to_json(r);
+            let vals: Vec<String> = row_vals
+                .iter()
+                .map(|jv| {
+                    if jv.is_null() {
+                        "NULL".to_string()
+                    } else {
+                        let s = match jv {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            _ => jv.to_string(),
+                        };
+                        format!("'{}'", s.replace('\'', "''"))
+                    }
+                })
+                .collect();
+            buf.push(format!("({})", vals.join(", ")));
+        }
+        writeln!(
+            file,
+            "INSERT INTO {qtable} ({}) VALUES\n{};",
             col_names.join(", "),
-            buf.join(",\\n")
-        ));
+            buf.join(",\n")
+        )
+        .map_err(|e| format!("写入失败: {e}"))?;
+        if (rows.len() as i64) < BATCH {
+            break;
+        }
+        offset += BATCH;
     }
-    Ok(out)
+    Ok(path)
 }
 
 /// 通用：写入文本文件（用于导出下载；路径需以 ~/ 开头）
@@ -3808,7 +3821,8 @@ mod tests {
             .await
             .expect("插入失败");
 
-        let sql = export_sql_core(&cfg, "tusk_demo", &tname).await.expect("导出失败");
+        let path = export_sql_core(&cfg, "tusk_demo", &tname).await.expect("导出失败");
+        let sql = std::fs::read_to_string(&path).expect("读导出文件失败");
         assert!(sql.contains(&format!("INSERT INTO \"{tname}\"")), "应有 INSERT: {sql}");
         assert!(sql.contains("O''Brien"), "引号应转义: {sql}");
         assert!(sql.contains("NULL"), "NULL 应保留: {sql}");
@@ -3816,6 +3830,7 @@ mod tests {
         assert!(sql.contains(";"), "应以分号结尾");
         // 行数：3 行数据（id 自动生成）
         assert!(sql.matches("INSERT INTO").count() >= 1, "应有 INSERT 语句");
+        std::fs::remove_file(&path).ok();
 
         drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
     }
