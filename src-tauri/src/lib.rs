@@ -1330,36 +1330,7 @@ async fn create_table_core(
     if columns.is_empty() {
         return Err("至少需要一个字段".into());
     }
-    let mut parts: Vec<String> = Vec::new();
-    let mut pk_cols: Vec<String> = Vec::new();
-    for c in &columns {
-        if c.name.trim().is_empty() {
-            return Err("字段名不能为空".into());
-        }
-        if c.col_type.trim().is_empty() {
-            return Err(format!("字段「{}」未选择类型", c.name));
-        }
-        let mut def = format!("{} {}", quote_ident(&c.name), c.col_type.trim());
-        if c.is_pk {
-            pk_cols.push(c.name.clone());
-        }
-        // serial 主键隐含 NOT NULL，无需重复
-        if !c.nullable && !c.is_serial {
-            def.push_str(" NOT NULL");
-        }
-        if let Some(d) = &c.default {
-            let d = d.trim();
-            if !d.is_empty() {
-                def.push_str(&format!(" DEFAULT {d}"));
-            }
-        }
-        parts.push(def);
-    }
-    if !pk_cols.is_empty() {
-        let pks: Vec<String> = pk_cols.iter().map(|p| quote_ident(p)).collect();
-        parts.push(format!("PRIMARY KEY ({})", pks.join(", ")));
-    }
-    let sql = format!("CREATE TABLE {} ({})", quote_ident(table), parts.join(", "));
+    let sql = build_create_table_sql(table, &columns)?;
 
     let mut c = cfg.clone();
     c.dbname = dbname.to_string();
@@ -1386,6 +1357,286 @@ async fn create_table_core(
             .map_err(|e| format!("添加注释失败: {e}"))?;
     }
     Ok(())
+}
+
+/// 纯函数：构建 CREATE TABLE SQL（表设计器语义）
+fn build_create_table_sql(table: &str, columns: &[ColumnDef]) -> Result<String, String> {
+    if table.trim().is_empty() {
+        return Err("表名不能为空".into());
+    }
+    if columns.is_empty() {
+        return Err("至少需要一个字段".into());
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut pk_cols: Vec<String> = Vec::new();
+    for c in columns {
+        if c.name.trim().is_empty() {
+            return Err("字段名不能为空".into());
+        }
+        if c.col_type.trim().is_empty() {
+            return Err(format!("字段「{}」未选择类型", c.name));
+        }
+        let mut def = format!("{} {}", quote_ident(&c.name), c.col_type.trim());
+        if c.is_pk {
+            pk_cols.push(c.name.clone());
+        }
+        // serial 主键隐含 NOT NULL，无需重复
+        if !c.nullable && !c.is_serial {
+            def.push_str(" NOT NULL");
+        }
+        if let Some(d) = &c.default {
+            let d = d.trim();
+            if !d.is_empty() {
+                def.push_str(&format!(" DEFAULT {d}"));
+            }
+        }
+        parts.push(def);
+    }
+    if !pk_cols.is_empty() {
+        let pks: Vec<String> = pk_cols.iter().map(|p| quote_ident(p)).collect();
+        parts.push(format!("PRIMARY KEY ({})", pks.join(", ")));
+    }
+    Ok(format!("CREATE TABLE {} ({})", quote_ident(table), parts.join(", ")))
+}
+
+/// 结构同步差异项
+#[derive(Serialize, Debug)]
+struct SchemaDiff {
+    table: String,
+    action: String, // "create" | "alter" | "drop"
+    sql: String,
+}
+
+/// SchemaColumn → ColumnDef（结构同步用）
+fn schema_cols_to_defs(cols: &[SchemaColumn]) -> Vec<ColumnDef> {
+    cols.iter()
+        .map(|c| {
+            let is_serial = c.default.as_deref().map(|d| d.contains("nextval(")).unwrap_or(false);
+            ColumnDef {
+                name: c.name.clone(),
+                col_type: c.type_name.clone(),
+                nullable: c.is_nullable == "YES",
+                default: if is_serial { None } else { c.default.clone() },
+                is_pk: c.is_pk,
+                is_serial,
+                comment: c.comment.clone(),
+            }
+        })
+        .collect()
+}
+
+/// 生成 ALTER TABLE 子句（列级 diff：类型/可空/默认/注释/增删列）
+fn diff_columns_sql(table: &str, src: &[SchemaColumn], dst: &[SchemaColumn]) -> Vec<String> {
+    let q = quote_ident(table);
+    let mut out: Vec<String> = Vec::new();
+    // 新增列（src 有 dst 无）
+    for s in src {
+        if !dst.iter().any(|d| d.name == s.name) {
+            let mut def = format!("ADD COLUMN {} {}", quote_ident(&s.name), s.type_name);
+            if s.is_nullable == "NO" && !s.default.as_deref().unwrap_or("").contains("nextval(") {
+                def.push_str(" NOT NULL");
+            }
+            if let Some(d) = &s.default {
+                let d = d.trim();
+                if !d.is_empty() && !d.contains("nextval(") {
+                    def.push_str(&format!(" DEFAULT {d}"));
+                }
+            }
+            out.push(format!("ALTER TABLE {q} {def}"));
+        }
+    }
+    // 删除列（dst 有 src 无）
+    for d in dst {
+        if !src.iter().any(|s| s.name == d.name) {
+            out.push(format!("ALTER TABLE {q} DROP COLUMN {}", quote_ident(&d.name)));
+        }
+    }
+    // 修改列（类型/可空/默认/注释）
+    for s in src {
+        if let Some(d) = dst.iter().find(|d| d.name == s.name) {
+            let s_serial = s.default.as_deref().unwrap_or("").contains("nextval(");
+            let d_serial = d.default.as_deref().unwrap_or("").contains("nextval(");
+            let norm = |t: &str| {
+                if t.contains("nextval(") {
+                    "serial".to_string()
+                } else {
+                    t.trim().to_string()
+                }
+            };
+            let s_t = norm(&s.type_name);
+            let d_t = norm(&d.type_name);
+            if s_t != d_t {
+                out.push(format!(
+                    "ALTER TABLE {q} ALTER COLUMN {} TYPE {}",
+                    quote_ident(&s.name),
+                    s.type_name
+                ));
+            }
+            if s.is_nullable != d.is_nullable {
+                let action = if s.is_nullable == "NO" { "SET NOT NULL" } else { "DROP NOT NULL" };
+                out.push(format!("ALTER TABLE {q} ALTER COLUMN {} {action}", quote_ident(&s.name)));
+            }
+            let s_def = if s_serial { "" } else { s.default.as_deref().unwrap_or("").trim() };
+            let d_def = if d_serial { "" } else { d.default.as_deref().unwrap_or("").trim() };
+            if s_def != d_def {
+                if s_def.is_empty() {
+                    out.push(format!(
+                        "ALTER TABLE {q} ALTER COLUMN {} DROP DEFAULT",
+                        quote_ident(&s.name)
+                    ));
+                } else {
+                    out.push(format!(
+                        "ALTER TABLE {q} ALTER COLUMN {} SET DEFAULT {}",
+                        quote_ident(&s.name),
+                        s_def
+                    ));
+                }
+            }
+            if s.comment.as_deref().unwrap_or("") != d.comment.as_deref().unwrap_or("") {
+                let c = s.comment.as_deref().unwrap_or("").replace('\'', "''");
+                out.push(format!(
+                    "COMMENT ON COLUMN {q}.{} IS '{}'",
+                    quote_ident(&s.name),
+                    c
+                ));
+            }
+        }
+    }
+    // 主键变化：先删旧约束（pg_constraint 查名），再加新
+    let src_pk: Vec<&str> = src.iter().filter(|c| c.is_pk).map(|c| c.name.as_str()).collect();
+    let dst_pk: Vec<&str> = dst.iter().filter(|c| c.is_pk).map(|c| c.name.as_str()).collect();
+    if src_pk != dst_pk {
+        // 主键约束名由调用方解析（需要连接查询），这里只生成 ADD；DROP 由核心处理
+        if !src_pk.is_empty() {
+            let cols: Vec<String> = src_pk.iter().map(|c| quote_ident(c)).collect();
+            out.push(format!("ADD PRIMARY KEY ({})", cols.join(", ")));
+        }
+    }
+    out
+}
+
+/// 核心：比较 src_db 与 dst_db 的结构差异（Navicat 结构同步）
+async fn compare_schemas_core(
+    cfg: &ConnConfig,
+    src_db: &str,
+    dst_db: &str,
+) -> Result<Vec<SchemaDiff>, String> {
+    if src_db == dst_db {
+        return Err("源库与目标库不能相同".into());
+    }
+    let src_tables = list_tables_core(cfg, src_db).await?;
+    let dst_tables = list_tables_core(cfg, dst_db).await?;
+    let mut diffs: Vec<SchemaDiff> = Vec::new();
+
+    for st in &src_tables {
+        if st.kind != "table" {
+            continue; // 只同步表（视图暂不同步）
+        }
+        match dst_tables.iter().find(|t| t.name == st.name) {
+            None => {
+                // 新建表
+                let cols = list_columns_core(cfg, src_db, &st.name).await?;
+                let col_defs = schema_cols_to_defs(&cols);
+                let mut sql = build_create_table_sql(&st.name, &col_defs)?;
+                let comment_stmts = comment_statements(&quote_ident(&st.name), None, &col_defs);
+                if !comment_stmts.is_empty() {
+                    sql.push('\n');
+                    sql.push_str(&comment_stmts.join("\n"));
+                }
+                diffs.push(SchemaDiff {
+                    table: st.name.clone(),
+                    action: "create".into(),
+                    sql,
+                });
+            }
+            Some(dt) => {
+                // 修改表：列级 diff + 主键
+                let src_cols = list_columns_core(cfg, src_db, &st.name).await?;
+                let dst_cols = list_columns_core(cfg, dst_db, &dt.name).await?;
+                let mut substmts = diff_columns_sql(&st.name, &src_cols, &dst_cols);
+                // 主键 drop（需要查 dst 的约束名）
+                let src_pk: Vec<&str> = src_cols.iter().filter(|c| c.is_pk).map(|c| c.name.as_str()).collect();
+                let dst_pk: Vec<&str> = dst_cols.iter().filter(|c| c.is_pk).map(|c| c.name.as_str()).collect();
+                if src_pk != dst_pk && !dst_pk.is_empty() {
+                    let mut c = cfg.clone();
+                    c.dbname = dst_db.to_string();
+                    let (client, _) = open_connection(&c).await?;
+                    let tbl_lit = format!("\"{}\"", dt.name.replace('"', "\"\""));
+                    let rows = client
+                        .query(
+                            &format!(
+                                "SELECT conname FROM pg_constraint WHERE conrelid = '{tbl_lit}'::regclass AND contype = 'p'"
+                            ),
+                            &[],
+                        )
+                        .await
+                        .map_err(|e| format!("查询主键约束失败: {e}"))?;
+                    for r in rows {
+                        let conname: String = r.get(0);
+                        substmts.insert(
+                            0,
+                            format!("ALTER TABLE {} DROP CONSTRAINT {}", quote_ident(&st.name), quote_ident(&conname)),
+                        );
+                    }
+                }
+                if !substmts.is_empty() {
+                    diffs.push(SchemaDiff {
+                        table: st.name.clone(),
+                        action: "alter".into(),
+                        sql: format!("{};", substmts.join(";\n")),
+                    });
+                }
+            }
+        }
+    }
+    for dt in &dst_tables {
+        if dt.kind != "table" {
+            continue;
+        }
+        if !src_tables.iter().any(|t| t.name == dt.name) {
+            diffs.push(SchemaDiff {
+                table: dt.name.clone(),
+                action: "drop".into(),
+                sql: format!("DROP TABLE {}", quote_ident(&dt.name)),
+            });
+        }
+    }
+    Ok(diffs)
+}
+
+#[tauri::command]
+async fn execute_sql(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    sql: String,
+) -> Result<String, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    let mut c = cfg;
+    c.dbname = dbname;
+    let (client, _) = open_connection(&c).await?;
+    client
+        .batch_execute(&sql)
+        .await
+        .map_err(|e| format!("执行失败: {e}"))?;
+    Ok("执行成功".to_string())
+}
+
+#[tauri::command]
+async fn compare_schemas(
+    state: State<'_, AppState>,
+    conn_id: String,
+    src_db: String,
+    dst_db: String,
+) -> Result<Vec<SchemaDiff>, String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    compare_schemas_core(&cfg, &src_db, &dst_db).await
 }
 
 /// 核心：DROP TABLE
@@ -3344,6 +3595,62 @@ mod tests {
 
         drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理失败");
     }
+
+    #[tokio::test]
+    async fn test_schema_sync() {
+        let cfg = test_cfg();
+        let suffix = std::process::id();
+        let a = format!("tusk_sync_a_{suffix}");
+        let b = format!("tusk_sync_b_{suffix}");
+        // 建两个临时库（CREATE DATABASE 不能与多语句批量，须单条）
+        let (admin, _) = open_connection(&test_cfg()).await.expect("连接失败");
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{a}\" WITH (FORCE)"), &[]).await.ok();
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{b}\" WITH (FORCE)"), &[]).await.ok();
+        admin.execute(&format!("CREATE DATABASE \"{a}\""), &[]).await.expect("建库A失败");
+        admin.execute(&format!("CREATE DATABASE \"{b}\""), &[]).await.expect("建库B失败");
+
+        // A 库：t1（2 列）+ t2；B 库：t1（3 列，改类型）+ t3
+        let cfg_a = { let mut c = cfg.clone(); c.dbname = a.clone(); c };
+        let cfg_b = { let mut c = cfg.clone(); c.dbname = b.clone(); c };
+        create_table_core(&cfg_a, &a, "t1", vec![
+            ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+            ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
+        ], None).await.expect("A.t1 建表失败");
+        create_table_core(&cfg_a, &a, "t2", vec![
+            ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+        ], None).await.expect("A.t2 建表失败");
+        create_table_core(&cfg_b, &b, "t1", vec![
+            ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+            ColumnDef { name: "name".into(), col_type: "varchar(20)".into(), nullable: false, default: None, is_pk: false, is_serial: false, comment: None },
+            ColumnDef { name: "qty".into(), col_type: "int4".into(), nullable: true, default: Some("0".into()), is_pk: false, is_serial: false, comment: None },
+        ], None).await.expect("B.t1 建表失败");
+        create_table_core(&cfg_b, &b, "t3", vec![
+            ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+        ], None).await.expect("B.t3 建表失败");
+
+        // 比较 A → B
+        let diffs = compare_schemas_core(&cfg, &a, &b).await.expect("比较失败");
+        // t2 新建、t1 修改、t3 删除
+        let names: Vec<String> = diffs.iter().map(|d| d.table.clone()).collect();
+        assert!(diffs.iter().any(|d| d.table == "t2" && d.action == "create"), "t2 应新建: {names:?}");
+        assert!(diffs.iter().any(|d| d.table == "t1" && d.action == "alter"), "t1 应修改: {names:?}");
+        assert!(diffs.iter().any(|d| d.table == "t3" && d.action == "drop"), "t3 应删除: {names:?}");
+
+        // 执行同步 SQL
+        for d in &diffs {
+            let mut c = cfg.clone();
+            c.dbname = b.clone();
+            let (client, _) = open_connection(&c).await.expect("连接失败");
+            client.batch_execute(&d.sql).await.expect(&format!("执行 {} 失败: {}", d.table, d.sql));
+        }
+
+        // 再次比较应为空（结构一致）
+        let diffs2 = compare_schemas_core(&cfg, &a, &b).await.expect("比较2失败");
+        assert!(diffs2.is_empty(), "同步后应无差异: {:?}", diffs2.iter().map(|d| (&d.table, &d.action)).collect::<Vec<_>>());
+
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{a}\" WITH (FORCE)"), &[]).await.ok();
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{b}\" WITH (FORCE)"), &[]).await.ok();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3379,7 +3686,9 @@ pub fn run() {
             write_text_file,
             create_view,
             drop_view,
-            list_indexes
+            list_indexes,
+            compare_schemas,
+            execute_sql
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

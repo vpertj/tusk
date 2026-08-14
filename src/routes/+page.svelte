@@ -623,6 +623,72 @@
     status = `每页行数已设为 ${n}`;
   }
 
+  // ===== 结构同步（Navicat） =====
+  let showSync = $state(false);
+  let syncSrc = $state('');
+  let syncDst = $state('');
+  let syncDiffs = $state<{ table: string; action: string; sql: string; checked: boolean }[]>([]);
+  let syncError = $state('');
+  let syncMsg = $state('');
+  let syncBusy = $state(false);
+
+  function openSyncDialog() {
+    if (dbs.length < 2) {
+      status = '至少需要 2 个数据库才能同步';
+      return;
+    }
+    syncSrc = dbs[0].name;
+    syncDst = dbs[1].name;
+    syncDiffs = [];
+    syncError = '';
+    syncMsg = '';
+    showSync = true;
+  }
+
+  async function doCompare() {
+    if (!syncSrc || !syncDst) return;
+    if (syncSrc === syncDst) {
+      syncError = '源库与目标库不能相同';
+      return;
+    }
+    syncBusy = true;
+    syncError = '';
+    syncMsg = '';
+    try {
+      const diffs = await invoke<{ table: string; action: string; sql: string }[]>('compare_schemas', {
+        connId,
+        srcDb: syncSrc,
+        dstDb: syncDst,
+      });
+      syncDiffs = diffs.map((d) => ({ ...d, checked: true }));
+      if (!diffs.length) syncMsg = '两库结构完全一致 ✅';
+    } catch (e) {
+      syncError = String(e);
+    }
+    syncBusy = false;
+  }
+
+  async function doSyncExecute() {
+    const sel = syncDiffs.filter((d) => d.checked);
+    if (!sel.length) return;
+    syncBusy = true;
+    syncError = '';
+    syncMsg = '';
+    try {
+      let ok = 0;
+      for (const d of sel) {
+        await invoke('execute_sql', { connId, dbname: syncDst, sql: d.sql });
+        ok++;
+      }
+      syncMsg = `✅ 已执行 ${ok} 项差异，目标库结构已同步`;
+      syncDiffs = [];
+      await loadDbs();
+    } catch (e) {
+      syncError = String(e);
+    }
+    syncBusy = false;
+  }
+
   // ================= 标签页工作区 =================
   interface QueryResultView {
     columns: { name: string; type_name: string }[];
@@ -1258,6 +1324,7 @@
       >
       <button onclick={openDesigner} disabled={!connId} title="新建表（表设计器）">＋ 新建表</button>
       <button onclick={openViewDialog} disabled={!connId} title="新建视图">＋ 新建视图</button>
+      <button onclick={openSyncDialog} disabled={!connId} title="结构同步（Navicat）">⇄ 结构同步</button>
       <button onclick={loadDbs} disabled={!connId} title="刷新对象树">⟳ 刷新</button>
       <button onclick={openSettings} title="设置">⚙ 设置</button>
       {#if connId}
@@ -2029,6 +2096,93 @@
             <button onclick={() => (insertDialog = null)}>取消</button>
             <button onclick={doInsertRow} class="primary">插入</button>
           </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ============ 结构同步弹窗 ============ -->
+  {#if showSync}
+    <div class="overlay" role="presentation" onclick={() => (showSync = false)}>
+      <div
+        class="conn-dialog sync-dialog"
+        role="dialog"
+        aria-label="结构同步"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (showSync = false)}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">⇄ 结构同步</span>
+          <button class="dialog-close" onclick={() => (showSync = false)}>×</button>
+        </div>
+        <div class="dialog-body">
+          <div class="sync-pair">
+            <div class="field">
+              <label for="s-src">源数据库</label>
+              <select id="s-src" bind:value={syncSrc}>
+                {#each dbs as db}
+                  <option value={db.name}>{db.name}</option>
+                {/each}
+              </select>
+            </div>
+            <div class="sync-arrow">→</div>
+            <div class="field">
+              <label for="s-dst">目标数据库</label>
+              <select id="s-dst" bind:value={syncDst}>
+                {#each dbs as db}
+                  <option value={db.name}>{db.name}</option>
+                {/each}
+              </select>
+            </div>
+          </div>
+          <div class="field-actions" style="margin: 10px 0">
+            <button onclick={doCompare} disabled={syncBusy}>
+              {syncBusy ? '比较中…' : '🔍 比较结构'}
+            </button>
+          </div>
+          {#if syncError}
+            <div class="sync-err">⚠ {syncError}</div>
+          {/if}
+          {#if syncMsg}
+            <div class="sync-ok">{syncMsg}</div>
+          {/if}
+          {#if syncDiffs.length > 0}
+            <div class="sync-list">
+              <div class="sync-head">
+                <span>表</span>
+                <span>操作</span>
+                <span>SQL 预览</span>
+              </div>
+              {#each syncDiffs as d, i (d.table)}
+                <div class="sync-item">
+                  <label class="sync-check">
+                    <input type="checkbox" bind:checked={d.checked} />
+                    <span class="sync-tbl">{d.table}</span>
+                  </label>
+                  <span class="sync-act {d.action}">
+                    {d.action === 'create' ? '＋ 新建' : d.action === 'alter' ? '✎ 修改' : '🗑 删除'}
+                  </span>
+                  <span class="sync-sql">{d.sql.split('\n')[0]}{d.sql.split('\n').length > 1 ? ' …' : ''}</span>
+                </div>
+              {/each}
+            </div>
+            <div class="field-actions" style="margin-top: 12px">
+              <button
+                onclick={() =>
+                  (syncDiffs = syncDiffs.map((d) => ({ ...d, checked: !d.checked })))}
+              >
+                全选/全不选
+              </button>
+              <button
+                onclick={doSyncExecute}
+                class="primary danger"
+                disabled={syncBusy || !syncDiffs.some((d) => d.checked)}
+              >
+                {syncBusy ? '执行中…' : `⚡ 执行同步（${syncDiffs.filter((d) => d.checked).length} 项）`}
+              </button>
+            </div>
+          {/if}
         </div>
       </div>
     </div>
@@ -2882,6 +3036,108 @@
     font-size: 11px;
     font-weight: 400;
     margin-left: 6px;
+  }
+
+  /* 结构同步弹窗 */
+  .sync-dialog {
+    width: 680px;
+  }
+
+  .sync-pair {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+  }
+
+  .sync-pair .field {
+    flex: 1;
+  }
+
+  .sync-arrow {
+    font-size: 20px;
+    color: #6f7a8d;
+    padding-bottom: 6px;
+  }
+
+  .sync-err {
+    color: #e05656;
+    font-size: 12px;
+    padding: 6px 0;
+  }
+
+  .sync-ok {
+    color: #4caf50;
+    font-size: 12px;
+    padding: 6px 0;
+  }
+
+  .sync-list {
+    border: 1px solid #2c303a;
+    border-radius: 6px;
+    background: #1c2029;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .sync-head,
+  .sync-item {
+    display: grid;
+    grid-template-columns: 1.2fr 0.7fr 2.2fr;
+    gap: 8px;
+    padding: 6px 10px;
+    align-items: center;
+  }
+
+  .sync-head {
+    background: #242833;
+    color: #8b93a3;
+    font-size: 11px;
+    position: sticky;
+    top: 0;
+  }
+
+  .sync-item {
+    border-top: 1px solid #242833;
+    font-size: 12px;
+  }
+
+  .sync-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #d7dae0;
+  }
+
+  .sync-act {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    text-align: center;
+    width: fit-content;
+  }
+
+  .sync-act.create {
+    background: #1e3a2a;
+    color: #4caf50;
+  }
+
+  .sync-act.alter {
+    background: #3a3420;
+    color: #e0b34c;
+  }
+
+  .sync-act.drop {
+    background: #3a2020;
+    color: #e05656;
+  }
+
+  .sync-sql {
+    color: #6f7a8d;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* 对象搜索弹窗 */
