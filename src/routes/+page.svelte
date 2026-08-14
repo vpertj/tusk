@@ -622,10 +622,12 @@
         await invoke('drop_view', { connId, dbname: cd.db, viewName: cd.table });
       } else if (cd.kind === 'database') {
         await invoke('drop_database', { connId, name: cd.db });
-        // 关闭该库的所有页签
+        // 关闭该库的所有页签 + 清缓存
         for (const t of [...tabs]) {
           if (t.dbname === cd.db) closeTab(t.id);
         }
+        delete tables[cd.db];
+        delete treeOpen[cd.db];
         await loadDbs();
         return;
       } else {
@@ -765,6 +767,9 @@
       }
       syncMsg = `✅ 已执行 ${ok} 项差异，目标库结构已同步`;
       syncDiffs = [];
+      // 清目标库表缓存，强制树重新加载（否则显示旧数据）
+      delete tables[syncDst];
+      delete treeOpen[syncDst];
       await loadDbs();
     } catch (e) {
       syncError = String(e);
