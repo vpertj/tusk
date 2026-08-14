@@ -1551,10 +1551,6 @@
 <div class="app">
   <!-- ============ 顶部工具栏 ============ -->
   <header>
-    <div class="logo">
-      <img src="/tusk-icon.png" class="app-logo" alt="Tusk" />
-      <span class="app-name">Tusk</span>
-    </div>
     <div class="toolbar">
       <div class="grp">
         <button onclick={openNewTab} disabled={!connId} data-tip="新建查询 (⌘N)" aria-label="新建查询">
@@ -3003,7 +2999,9 @@
       <span>未连接</span>
     {/if}
     <span class="spacer"></span>
-    <span>Tusk v{APP_VERSION}</span>
+    <img src="/tusk-icon.png" class="footer-logo" alt="Tusk" />
+    <span class="footer-app-name">Tusk</span>
+    <span class="footer-ver">v{APP_VERSION}</span>
   </footer>
 </div>
 
@@ -3033,25 +3031,24 @@
     border-bottom: 1px solid #2c303a;
   }
 
-  .logo {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    white-space: nowrap;
-  }
-
-  .app-logo {
-    width: 22px;
-    height: 22px;
-    border-radius: 5px;
+  .footer-logo {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
     flex-shrink: 0;
+    margin-left: 4px;
   }
 
-  .app-name {
-    font-size: 15px;
-    font-weight: 700;
-    color: #e8ebf0;
-    letter-spacing: 0.3px;
+  .footer-app-name {
+    font-size: 11px;
+    font-weight: 600;
+    color: #aab2c0;
+  }
+
+  .footer-ver {
+    font-size: 11px;
+    color: #6b7484;
+    margin-left: 2px;
   }
 
   .toolbar {
