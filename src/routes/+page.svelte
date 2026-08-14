@@ -57,6 +57,13 @@
   // ================= 连接状态 =================
   let connId = $state('');
   let version = $state('');
+  /** 连接元信息（底部状态栏绿色显示） */
+  let connMeta = $state<{ user: string; host: string; port: number; version: string }>({
+    user: '',
+    host: '',
+    port: 0,
+    version: '',
+  });
   let connecting = $state(false);
   let status = $state('未连接');
 
@@ -1007,7 +1014,13 @@
   async function doConnect() {
     connecting = true;
     try {
-      const info = await invoke<{ id: string; version: string }>('connect', {
+      const info = await invoke<{
+        id: string;
+        version: string;
+        user: string;
+        host: string;
+        port: number;
+      }>('connect', {
         host,
         port,
         user,
@@ -1016,6 +1029,7 @@
       });
       connId = info.id;
       version = info.version;
+      connMeta = { user: info.user, host: info.host, port: info.port, version: info.version };
       status = `已连接 · ${user}@${host}:${port}`;
       showConnPanel = false;
       ensureTab();
@@ -1068,9 +1082,16 @@
   async function connectSaved(name: string) {
     connecting = true;
     try {
-      const info = await invoke<{ id: string; version: string }>('connect_saved', { name });
+      const info = await invoke<{
+        id: string;
+        version: string;
+        user: string;
+        host: string;
+        port: number;
+      }>('connect_saved', { name });
       connId = info.id;
       version = info.version;
+      connMeta = { user: info.user, host: info.host, port: info.port, version: info.version };
       status = `已连接 · ${name}`;
       showConnPanel = false;
       ensureTab();
@@ -1601,13 +1622,6 @@
         </button>
       </div>
       <div class="spacer"></div>
-      <div class="grp">
-        {#if connId}
-          <button onclick={doDisconnect} class="danger" title="断开连接">断开</button>
-        {:else}
-          <button onclick={() => (showConnPanel = !showConnPanel)} class="primary" title="连接数据库">连接</button>
-        {/if}
-      </div>
     </div>
     <div class="status" class:ok={!!connId} class:err={status.startsWith('连接失败') || status.startsWith('加载')}>
       {status}
@@ -2979,11 +2993,21 @@
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
       </svg>
     </button>
-    <span>连接：{connId ? '已连接' : '未连接'}</span>
-    <span>· 数据库：{dbname}</span>
-    <span>· 对象树：{dbs.length} 库</span>
+    {#if connId}
+      <span class="conn-info">
+        <span class="conn-ok">已连接</span>
+        · {connMeta.user}@{connMeta.host}:{connMeta.port} {connMeta.version}
+      </span>
+    {:else}
+      <span>未连接</span>
+    {/if}
     <span class="spacer"></span>
     <span>Tusk v{APP_VERSION}</span>
+    {#if connId}
+      <button onclick={doDisconnect} class="danger footer-disconnect" title="断开连接">断开</button>
+    {:else}
+      <button onclick={() => (showConnPanel = !showConnPanel)} class="primary footer-disconnect" title="连接数据库">连接</button>
+    {/if}
   </footer>
 </div>
 
@@ -3097,16 +3121,18 @@
   }
 
   button.danger {
-    background: transparent;
-    border-color: #7a2e2e;
-    color: #e05656;
+    background: #d64545;
+    border-color: #d64545;
+    color: #ffffff;
     padding: 5px 12px;
     font-size: 12px;
+    font-weight: 600;
   }
 
   button.danger:hover:not(:disabled) {
-    background: #3a2020;
-    color: #f08585;
+    background: #e05656;
+    border-color: #e05656;
+    color: #ffffff;
   }
 
   /* 工具栏图标按钮 */
@@ -3129,23 +3155,6 @@
   .toolbar button svg {
     width: 16px;
     height: 16px;
-  }
-
-  .toolbar button.primary,
-  .toolbar button.danger {
-    width: auto;
-    padding: 5px 14px;
-    display: inline-flex;
-    align-items: center;
-    font-size: 12px;
-  }
-
-  .toolbar button.danger {
-    color: #e05656;
-  }
-
-  .toolbar button.danger:hover:not(:disabled) {
-    color: #f08585;
   }
 
   /* 工具栏按钮自定义 tooltip（WKWebView 不显示 title） */
@@ -4855,6 +4864,25 @@
 
   footer .spacer {
     flex: 1;
+  }
+
+  /* 底部状态栏连接信息（绿色） */
+  .conn-info {
+    color: #3fbf6a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .conn-ok {
+    color: #4cd67d;
+    font-weight: 600;
+  }
+
+  /* 底部连接/断开按钮 */
+  .footer-disconnect {
+    flex-shrink: 0;
+    margin-left: 10px;
   }
 
   /* 底部设置按钮（蓝色图标） */

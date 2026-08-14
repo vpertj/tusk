@@ -39,6 +39,9 @@ struct QueryResult {
 struct ConnectionInfo {
     id: String,
     version: String,
+    user: String,
+    host: String,
+    port: u16,
 }
 
 /// 连接配置（与 UI 表单字段一一对应）
@@ -144,6 +147,12 @@ async fn connect(
         dbname,
     };
     let (client, version) = open_connection(&cfg).await?;
+    // 查实际登录用户（空 user 时 PG 默认当前系统用户）
+    let u = client
+        .query_one("SELECT current_user", &[])
+        .await
+        .map(|r| r.get::<_, String>(0))
+        .unwrap_or_default();
 
     let id = format!(
         "conn-{}",
@@ -156,10 +165,16 @@ async fn connect(
         id.clone(),
         ConnEntry {
             client,
-            cfg,
+            cfg: cfg.clone(),
         },
     );
-    Ok(ConnectionInfo { id, version })
+    Ok(ConnectionInfo {
+        id,
+        version,
+        user: u,
+        host: cfg.host,
+        port: cfg.port,
+    })
 }
 
 /// 断开连接（Tauri command 入口）
@@ -978,6 +993,12 @@ async fn delete_connection(name: String) -> Result<(), String> {
 async fn connect_saved(state: State<'_, AppState>, name: String) -> Result<ConnectionInfo, String> {
     let (cfg, _pw) = connect_saved_core(&name).await?;
     let (client, version) = open_connection(&cfg).await?;
+    // 查实际登录用户
+    let u = client
+        .query_one("SELECT current_user", &[])
+        .await
+        .map(|r| r.get::<_, String>(0))
+        .unwrap_or_default();
     let id = format!(
         "conn-{}",
         std::time::SystemTime::now()
@@ -989,10 +1010,16 @@ async fn connect_saved(state: State<'_, AppState>, name: String) -> Result<Conne
         id.clone(),
         ConnEntry {
             client,
-            cfg,
+            cfg: cfg.clone(),
         },
     );
-    Ok(ConnectionInfo { id, version })
+    Ok(ConnectionInfo {
+        id,
+        version,
+        user: u,
+        host: cfg.host,
+        port: cfg.port,
+    })
 }
 
 // ================= 数据编辑（行操作 + CSV 导出） =================
