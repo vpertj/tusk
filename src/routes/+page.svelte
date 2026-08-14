@@ -3324,16 +3324,17 @@
 
   .field-actions {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    justify-content: flex-end;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
     margin-top: 6px;
     padding-top: 12px;
     border-top: 1px solid #2c303a;
   }
 
   .field-actions button.primary {
-    width: 180px;
+    min-width: 90px;
   }
 
   .save-label {
