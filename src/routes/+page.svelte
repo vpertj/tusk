@@ -894,8 +894,27 @@
       status = '连接失败';
       const t = ensureTab();
       t.error = String(e);
+      // 本机 PG 未运行/未安装 → 环境引导
+      const msg = String(e);
+      pgHelp =
+        msg.includes('Connection refused') &&
+        (host === 'localhost' || host === '127.0.0.1' || host.trim() === '');
     }
     connecting = false;
+  }
+
+  // ===== PostgreSQL 环境引导（本机未装/未启动时） =====
+  let pgHelp = $state(false);
+  const PG_INSTALL_CMD = 'brew install postgresql@17';
+  const PG_START_CMD = 'brew services start postgresql@17';
+
+  async function copyCmd(cmd: string) {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      status = '命令已复制到剪贴板';
+    } catch {
+      status = '复制失败';
+    }
   }
 
   // 用已保存的连接一键连接
@@ -1484,6 +1503,23 @@
                   {connecting ? '连接中…' : '连接'}
                 </button>
               </div>
+              {#if pgHelp}
+                <div class="pg-help">
+                  <div class="pg-help-title">🐘 未检测到本机 PostgreSQL 服务</div>
+                  <p class="pg-help-desc">
+                    看起来本机 PostgreSQL 未安装或未启动。在「终端」中执行以下命令（按顺序），然后重新连接：
+                  </p>
+                  <div class="pg-help-cmd">
+                    <code>{PG_INSTALL_CMD}</code>
+                    <button onclick={() => copyCmd(PG_INSTALL_CMD)} title="复制命令">⧉ 复制</button>
+                  </div>
+                  <div class="pg-help-cmd">
+                    <code>{PG_START_CMD}</code>
+                    <button onclick={() => copyCmd(PG_START_CMD)} title="复制命令">⧉ 复制</button>
+                  </div>
+                  <p class="pg-help-note">已安装但没启动？执行第二条命令即可。Windows 用户请安装官方 PostgreSQL 安装包。</p>
+                </div>
+              {/if}
             </div>
           </div>
         </div>
@@ -3362,6 +3398,66 @@
   .view-dialog textarea:focus {
     outline: none;
     border-color: #4fc3f7;
+  }
+
+  /* PG 环境引导 */
+  .pg-help {
+    margin-top: 14px;
+    background: #1c2029;
+    border: 1px solid #3a3420;
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+
+  .pg-help-title {
+    color: #e0b34c;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+
+  .pg-help-desc {
+    color: #aab2c0;
+    font-size: 12px;
+    margin: 0 0 10px;
+    line-height: 1.6;
+  }
+
+  .pg-help-cmd {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .pg-help-cmd code {
+    flex: 1;
+    background: #14171d;
+    border: 1px solid #2c303a;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #8fc7f0;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pg-help-cmd button {
+    background: #262a33;
+    border: 1px solid #363b47;
+    color: #d7dae0;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .pg-help-note {
+    color: #5c6472;
+    font-size: 11px;
+    margin: 4px 0 0;
   }
 
   /* 右键菜单 */
