@@ -1383,30 +1383,87 @@
       <span class="app-name">Tusk</span>
     </div>
     <div class="toolbar">
-      <button onclick={openNewTab} disabled={!connId} title="新建查询 (Cmd+N)">＋ 新建查询</button>
-      <input
-        type="file"
-        accept=".sql,.txt,text/plain"
-        id="sql-file-input"
-        hidden
-        onchange={onSqlFilePicked}
-      />
-      <button
-        onclick={() => document.getElementById('sql-file-input')?.click()}
-        disabled={!connId}
-        title="打开 .sql 文件加载到编辑器"
-        >📂 打开 SQL 文件</button
-      >
-      <button onclick={openDesigner} disabled={!connId} title="新建表（表设计器）">＋ 新建表</button>
-      <button onclick={openViewDialog} disabled={!connId} title="新建视图">＋ 新建视图</button>
-      <button onclick={openSyncDialog} disabled={!connId} title="结构同步（Navicat）">⇄ 结构同步</button>
-      <button onclick={loadDbs} disabled={!connId} title="刷新对象树">⟳ 刷新</button>
-      <button onclick={openSettings} title="设置">⚙ 设置</button>
-      {#if connId}
-        <button onclick={doDisconnect} class="danger">断开</button>
-      {:else}
-        <button onclick={() => (showConnPanel = !showConnPanel)}>连接</button>
-      {/if}
+      <div class="grp">
+        <button onclick={openNewTab} disabled={!connId} title="新建查询 (⌘N)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="12" y1="18" x2="12" y2="12" />
+            <line x1="9" y1="15" x2="15" y2="15" />
+          </svg>
+        </button>
+        <input
+          type="file"
+          accept=".sql,.txt,text/plain"
+          id="sql-file-input"
+          hidden
+          onchange={onSqlFilePicked}
+        />
+        <button
+          onclick={() => document.getElementById('sql-file-input')?.click()}
+          disabled={!connId}
+          title="打开 .sql 文件"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+        </button>
+      </div>
+      <div class="sep"></div>
+      <div class="grp">
+        <button onclick={openDesigner} disabled={!connId} title="新建表">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" />
+            <rect x="14" y="3" width="7" height="7" />
+            <rect x="14" y="14" width="7" height="7" />
+            <rect x="3" y="14" width="7" height="7" />
+          </svg>
+        </button>
+        <button onclick={openViewDialog} disabled={!connId} title="新建视图">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        </button>
+        <button onclick={openSyncDialog} disabled={!connId} title="结构同步">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10" />
+            <polyline points="1 20 1 14 7 14" />
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+          </svg>
+        </button>
+      </div>
+      <div class="sep"></div>
+      <div class="grp">
+        <button onclick={loadDbs} disabled={!connId} title="刷新对象树">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+        </button>
+        <button onclick={() => { searchOpen = true; }} disabled={!connId} title="搜索对象 (⌘F)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+        </button>
+      </div>
+      <div class="spacer"></div>
+      <div class="grp">
+        <span class="conn-dot" class:ok={!!connId}></span>
+        <span class="conn-label">{connId ? '已连接' : '未连接'}</span>
+        {#if connId}
+          <button onclick={doDisconnect} class="danger" title="断开连接">断开</button>
+        {:else}
+          <button onclick={() => (showConnPanel = !showConnPanel)} class="primary" title="连接数据库">连接</button>
+        {/if}
+        <button onclick={openSettings} class="icon-btn" title="设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+      </div>
     </div>
     <div class="status" class:ok={!!connId} class:err={status.startsWith('连接失败') || status.startsWith('加载')}>
       {status}
@@ -2648,37 +2705,134 @@
 
   .toolbar {
     display: flex;
-    gap: 6px;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .toolbar .grp {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .toolbar .sep {
+    width: 1px;
+    height: 18px;
+    background: #2c303a;
+    margin: 0 8px;
+    flex-shrink: 0;
+  }
+
+  .toolbar .spacer {
     flex: 1;
   }
 
+  /* 全局按钮：默认幽灵样式，主操作 .primary */
   button {
-    background: #2f6fed;
-    border: none;
+    background: transparent;
+    border: 1px solid transparent;
     border-radius: 6px;
-    color: #fff;
-    padding: 5px 14px;
+    color: #c3c9d4;
+    padding: 5px 12px;
     font-size: 12px;
     cursor: pointer;
     white-space: nowrap;
+    transition: background 0.12s ease, color 0.12s ease;
   }
 
   button:hover:not(:disabled) {
-    background: #4a83f5;
+    background: #262b36;
+    color: #f0f2f5;
   }
 
   button:disabled {
-    opacity: 0.5;
+    opacity: 0.4;
     cursor: not-allowed;
   }
 
-  button.danger {
-    background: #d64545;
+  button.primary {
+    background: #2f6fed;
+    border-color: #2f6fed;
+    color: #fff;
+    padding: 5px 16px;
+    font-size: 12px;
   }
 
-  button.primary {
-    padding: 8px 22px;
-    font-size: 13px;
+  button.primary:hover:not(:disabled) {
+    background: #4a83f5;
+    border-color: #4a83f5;
+    color: #fff;
+  }
+
+  button.danger {
+    background: transparent;
+    border-color: #7a2e2e;
+    color: #e05656;
+    padding: 5px 12px;
+    font-size: 12px;
+  }
+
+  button.danger:hover:not(:disabled) {
+    background: #3a2020;
+    color: #f08585;
+  }
+
+  /* 工具栏图标按钮 */
+  .toolbar button {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    color: #9aa3b2;
+  }
+
+  .toolbar button:hover:not(:disabled) {
+    background: #262b36;
+    color: #f0f2f5;
+  }
+
+  .toolbar button svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .toolbar button.primary,
+  .toolbar button.danger {
+    width: auto;
+    padding: 5px 14px;
+    display: inline-flex;
+    align-items: center;
+    font-size: 12px;
+  }
+
+  .toolbar button.icon-btn {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+  }
+
+  /* 连接状态指示 */
+  .conn-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #5c6472;
+    flex-shrink: 0;
+  }
+
+  .conn-dot.ok {
+    background: #4caf50;
+    box-shadow: 0 0 6px rgba(76, 175, 80, 0.5);
+  }
+
+  .conn-label {
+    color: #8b93a3;
+    font-size: 12px;
+    margin-right: 4px;
   }
 
   .status {
