@@ -1378,7 +1378,10 @@
 <div class="app">
   <!-- ============ 顶部工具栏 ============ -->
   <header>
-    <div class="logo">🐘 Tusk</div>
+    <div class="logo">
+      <img src="/tusk-icon.png" class="app-logo" alt="Tusk" />
+      <span class="app-name">Tusk</span>
+    </div>
     <div class="toolbar">
       <button onclick={openNewTab} disabled={!connId} title="新建查询 (Cmd+N)">＋ 新建查询</button>
       <input
@@ -2623,10 +2626,24 @@
   }
 
   .logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+  }
+
+  .app-logo {
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    flex-shrink: 0;
+  }
+
+  .app-name {
     font-size: 15px;
     font-weight: 700;
-    color: #4fc3f7;
-    white-space: nowrap;
+    color: #e8ebf0;
+    letter-spacing: 0.3px;
   }
 
   .toolbar {
