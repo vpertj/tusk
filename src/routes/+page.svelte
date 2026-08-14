@@ -1607,12 +1607,6 @@
         {:else}
           <button onclick={() => (showConnPanel = !showConnPanel)} class="primary" title="连接数据库">连接</button>
         {/if}
-        <button onclick={openSettings} class="icon-btn" data-tip="设置" aria-label="设置">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
-        </button>
       </div>
     </div>
     <div class="status" class:ok={!!connId} class:err={status.startsWith('连接失败') || status.startsWith('加载')}>
@@ -2979,11 +2973,17 @@
 
   <!-- ============ 底部状态栏 ============ -->
   <footer>
+    <button class="footer-settings" onclick={openSettings} title="设置" aria-label="设置">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      </svg>
+    </button>
     <span>连接：{connId ? '已连接' : '未连接'}</span>
     <span>· 数据库：{dbname}</span>
     <span>· 对象树：{dbs.length} 库</span>
     <span class="spacer"></span>
-    <span>Tusk v1.0.0</span>
+    <span>Tusk v{APP_VERSION}</span>
   </footer>
 </div>
 
@@ -3140,10 +3140,12 @@
     font-size: 12px;
   }
 
-  .toolbar button.icon-btn {
-    width: 30px;
-    height: 30px;
-    padding: 0;
+  .toolbar button.danger {
+    color: #e05656;
+  }
+
+  .toolbar button.danger:hover:not(:disabled) {
+    color: #f08585;
   }
 
   /* 工具栏按钮自定义 tooltip（WKWebView 不显示 title） */
@@ -4853,5 +4855,31 @@
 
   footer .spacer {
     flex: 1;
+  }
+
+  /* 底部设置按钮（蓝色图标） */
+  .footer-settings {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 5px;
+    border: none;
+    background: #2f6fed;
+    color: #fff;
+    cursor: pointer;
+    margin-right: 2px;
+    flex-shrink: 0;
+  }
+
+  .footer-settings:hover {
+    background: #4a83f5;
+  }
+
+  .footer-settings svg {
+    width: 12px;
+    height: 12px;
   }
 </style>
