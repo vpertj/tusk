@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { format as formatSql } from 'sql-formatter';
   import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 
   // ===== 窗口大小记忆：启动恢复、resize 防抖保存 =====
@@ -15,7 +16,7 @@
     // 恢复失败忽略
   }
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
-  window.addEventListener('resize', () => {
+  function onWinResize() {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(async () => {
       try {
@@ -25,7 +26,9 @@
         // 保存失败忽略
       }
     }, 500);
-  });
+  }
+  window.addEventListener('resize', onWinResize);
+  window.addEventListener('keydown', onGlobalKeydown);
 
   // ================= 连接配置 =================
   let host = $state('localhost');
@@ -559,6 +562,67 @@
   let columns = $state<Record<string, SchemaColumn[]>>({});
   let loadingKey = $state('');
 
+  // ===== 对象搜索（Cmd+F） =====
+  let searchOpen = $state(false);
+  let searchQuery = $state('');
+
+  function searchResults() {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [];
+    const out: { db: string; table: string; kind: string }[] = [];
+    for (const db of dbs) {
+      const dbs_match = db.name.toLowerCase().includes(q);
+      for (const t of tables[db.name] ?? []) {
+        if (dbs_match || t.name.toLowerCase().includes(q)) {
+          out.push({ db: db.name, table: t.name, kind: t.kind });
+          if (out.length >= 50) return out;
+        }
+      }
+    }
+    return out;
+  }
+
+  function openSearchResult(r: { db: string; table: string }) {
+    openTableTab(r.db, r.table);
+    searchOpen = false;
+    searchQuery = '';
+  }
+
+  // 全局快捷键：Cmd/Ctrl+F 打开搜索
+  function onGlobalKeydown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+      if (!connId) return;
+      e.preventDefault();
+      searchOpen = true;
+    }
+  }
+
+  // ===== 设置（每页行数等，localStorage 持久化） =====
+  let showSettings = $state(false);
+  let settingsPageSize = $state(50);
+  try {
+    settingsPageSize = Number(localStorage.getItem('tusk.pageSize')) || 50;
+  } catch {
+    // 忽略
+  }
+
+  function openSettings() {
+    settingsPageSize = Number(localStorage.getItem('tusk.pageSize')) || 50;
+    showSettings = true;
+  }
+
+  function saveSettings() {
+    const n = Math.max(10, Math.min(500, Math.floor(settingsPageSize) || 50));
+    settingsPageSize = n;
+    localStorage.setItem('tusk.pageSize', String(n));
+    // 已打开的表页签分页大小同步
+    for (const t of tabs) {
+      if (t.kind === 'table') t.pageSize = n;
+    }
+    showSettings = false;
+    status = `每页行数已设为 ${n}`;
+  }
+
   // ================= 标签页工作区 =================
   interface QueryResultView {
     columns: { name: string; type_name: string }[];
@@ -824,7 +888,7 @@
       table,
       subTab: 'data',
       page: 1,
-      pageSize: 50,
+      pageSize: settingsPageSize,
       total: 0,
       loading: false,
       structure: undefined,
@@ -1082,6 +1146,18 @@
   }
 
   // ================= 查询 =================
+  // 格式化当前查询 SQL（sql-formatter，PostgreSQL 方言）
+  function formatQuery() {
+    const t = activeTab;
+    if (!t || t.kind !== 'query' || !t.sql.trim()) return;
+    try {
+      t.sql = formatSql(t.sql, { language: 'postgresql' });
+      status = 'SQL 已格式化';
+    } catch (e) {
+      status = `格式化失败: ${e}`;
+    }
+  }
+
   async function runQuery(tab?: QueryTab) {
     const t = tab ?? activeTab;
     if (!t || !connId || !t.sql.trim()) return;
@@ -1183,6 +1259,7 @@
       <button onclick={openDesigner} disabled={!connId} title="新建表（表设计器）">＋ 新建表</button>
       <button onclick={openViewDialog} disabled={!connId} title="新建视图">＋ 新建视图</button>
       <button onclick={loadDbs} disabled={!connId} title="刷新对象树">⟳ 刷新</button>
+      <button onclick={openSettings} title="设置">⚙ 设置</button>
       {#if connId}
         <button onclick={doDisconnect} class="danger">断开</button>
       {:else}
@@ -1434,7 +1511,10 @@
               ></textarea>
               <div class="editor-bar">
                 <button onclick={() => runQuery(activeTab)} disabled={!connId || activeTab.running}>
-                  ▶ 执行 <kbd>⌘⏎</kbd>
+                  ▶ 执行
+                </button>
+                <button onclick={formatQuery} disabled={!activeTab.sql.trim()} title="格式化 SQL">
+                  ✨ 格式化
                 </button>
                 <button
                   onclick={() => runExplain(activeTab)}
@@ -1948,6 +2028,84 @@
           <div class="field-actions" style="margin-top:16px">
             <button onclick={() => (insertDialog = null)}>取消</button>
             <button onclick={doInsertRow} class="primary">插入</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ============ 设置弹窗 ============ -->
+  {#if showSettings}
+    <div class="overlay" role="presentation" onclick={() => (showSettings = false)}>
+      <div
+        class="conn-dialog settings-dialog"
+        role="dialog"
+        aria-label="设置"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (showSettings = false)}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">⚙ 设置</span>
+          <button class="dialog-close" onclick={() => (showSettings = false)}>×</button>
+        </div>
+        <div class="dialog-body">
+          <div class="field">
+            <label for="s-ps">数据页每页行数（10-500）</label>
+            <input id="s-ps" type="number" min="10" max="500" bind:value={settingsPageSize} />
+          </div>
+          <div class="field-actions" style="margin-top:18px">
+            <button onclick={() => (showSettings = false)}>取消</button>
+            <button onclick={saveSettings} class="primary">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ============ 对象搜索弹窗（Cmd+F） ============ -->
+  {#if searchOpen}
+    <div class="overlay" role="presentation" onclick={() => (searchOpen = false)}>
+      <div
+        class="conn-dialog search-dialog"
+        role="dialog"
+        aria-label="搜索对象"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (searchOpen = false)}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">🔍 搜索对象 <kbd>⌘F</kbd></span>
+          <button class="dialog-close" onclick={() => (searchOpen = false)}>×</button>
+        </div>
+        <div class="dialog-body">
+          <div class="field">
+            <input
+              bind:value={searchQuery}
+              placeholder="输入表名 / 视图名 / 数据库名…"
+              autofocus
+            />
+          </div>
+          <div class="search-list">
+            {#if !searchQuery.trim()}
+              <div class="search-empty">输入关键字开始搜索</div>
+            {:else if searchResults().length === 0}
+              <div class="search-empty">无匹配对象</div>
+            {:else}
+              {#each searchResults() as r (r.db + '.' + r.table)}
+                <button
+                  class="search-item"
+                  role="button"
+                  onclick={() => openSearchResult(r)}
+                  title={`打开 ${r.db}.${r.table}`}
+                >
+                  <span class="ico">{r.kind === 'view' ? '👁' : '📋'}</span>
+                  <span class="s-db">{r.db}</span>
+                  <span class="s-sep">.</span>
+                  <span class="s-tbl">{r.table}</span>
+                </button>
+              {/each}
+            {/if}
           </div>
         </div>
       </div>
@@ -2726,6 +2884,63 @@
     font-size: 11px;
     font-weight: 400;
     margin-left: 6px;
+  }
+
+  /* 对象搜索弹窗 */
+  .search-dialog {
+    width: 420px;
+  }
+
+  .search-list {
+    max-height: 320px;
+    overflow-y: auto;
+    margin-top: 8px;
+    border: 1px solid #2c303a;
+    border-radius: 6px;
+    background: #1c2029;
+  }
+
+  .search-empty {
+    color: #5c6472;
+    font-size: 12px;
+    padding: 18px;
+    text-align: center;
+  }
+
+  .search-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 7px 10px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #242833;
+    color: #d7dae0;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .search-item:last-child {
+    border-bottom: none;
+  }
+
+  .search-item:hover {
+    background: #242833;
+  }
+
+  .search-item .s-db {
+    color: #6f7a8d;
+  }
+
+  .search-item .s-sep {
+    color: #4a5264;
+  }
+
+  .search-item .s-tbl {
+    color: #e8ebf0;
+    font-weight: 600;
   }
 
   /* 新建视图弹窗 */
