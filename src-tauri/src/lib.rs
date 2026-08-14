@@ -1660,6 +1660,59 @@ async fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 核心：新建数据库（CREATE DATABASE 不能参数化 → 严格标识符白名单防注入）
+async fn create_database_core(
+    cfg: &ConnConfig,
+    name: &str,
+    owner: Option<&str>,
+    encoding: Option<&str>,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("数据库名不能为空".into());
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err("数据库名只能包含字母、数字和下划线".into());
+    }
+    let mut sql = format!("CREATE DATABASE \"{name}\"");
+    if let Some(o) = owner {
+        let o = o.trim();
+        if !o.is_empty() {
+            if !o.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Err("所有者只能包含字母、数字和下划线".into());
+            }
+            sql.push_str(&format!(" OWNER \"{o}\""));
+        }
+    }
+    if let Some(e) = encoding {
+        let e = e.trim();
+        if !e.is_empty() {
+            sql.push_str(&format!(" ENCODING '{e}'"));
+        }
+    }
+    let (client, _) = open_connection(cfg).await?;
+    client
+        .execute(&sql, &[])
+        .await
+        .map_err(|e| format!("创建数据库失败: {e:?}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_database(
+    state: State<'_, AppState>,
+    conn_id: String,
+    name: String,
+    owner: Option<String>,
+    encoding: Option<String>,
+) -> Result<(), String> {
+    let cfg = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+    };
+    create_database_core(&cfg, &name, owner.as_deref(), encoding.as_deref()).await
+}
+
 #[tauri::command]
 async fn compare_schemas(
     state: State<'_, AppState>,
@@ -3686,6 +3739,29 @@ mod tests {
         admin.execute(&format!("DROP DATABASE IF EXISTS \"{a}\" WITH (FORCE)"), &[]).await.ok();
         admin.execute(&format!("DROP DATABASE IF EXISTS \"{b}\" WITH (FORCE)"), &[]).await.ok();
     }
+
+    #[tokio::test]
+    async fn test_create_database() {
+        let cfg = test_cfg();
+        let name = format!("tusk_db_{}", std::process::id());
+        let admin = open_connection(&cfg).await.expect("连接失败").0;
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{name}\""), &[]).await.ok();
+
+        // 正常创建
+        create_database_core(&cfg, &name, None, None).await.expect("创建失败");
+        let dbs = list_databases_core(&admin).await.expect("列库失败");
+        assert!(dbs.iter().any(|d| d.name == name), "新库应出现在列表中");
+
+        // 重名应报错
+        let err = create_database_core(&cfg, &name, None, None).await.expect_err("重名应报错");
+        assert!(err.contains("已存在") || err.to_lowercase().contains("exist"), "错误: {err}");
+
+        // 非法名字符应拒绝（防注入）
+        let err2 = create_database_core(&cfg, "bad; DROP DATABASE x", None, None).await.expect_err("非法名应拒绝");
+        assert!(err2.contains("只能包含"), "错误: {err2}");
+
+        admin.execute(&format!("DROP DATABASE IF EXISTS \"{name}\""), &[]).await.ok();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3725,7 +3801,8 @@ pub fn run() {
             compare_schemas,
             execute_sql,
             open_url,
-            check_update
+            check_update,
+            create_database
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

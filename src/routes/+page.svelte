@@ -744,6 +744,36 @@
     }
   }, 5000);
 
+  // ===== 新建数据库 =====
+  let showDbDialog = $state(false);
+  let newDbName = $state('');
+  let newDbEncoding = $state('UTF8');
+
+  function openDbDialog() {
+    newDbName = '';
+    newDbEncoding = 'UTF8';
+    showDbDialog = true;
+  }
+
+  async function doCreateDb() {
+    if (!newDbName.trim()) {
+      status = '数据库名不能为空';
+      return;
+    }
+    try {
+      await invoke('create_database', {
+        connId,
+        name: newDbName.trim(),
+        encoding: newDbEncoding || null,
+      });
+      showDbDialog = false;
+      status = `已创建数据库 ${newDbName.trim()}`;
+      await loadDbs();
+    } catch (e) {
+      status = `创建失败: ${e}`;
+    }
+  }
+
   // ================= 标签页工作区 =================
   interface QueryResultView {
     columns: { name: string; type_name: string }[];
@@ -1585,7 +1615,22 @@
 
     <!-- ============ 左侧对象树 ============ -->
     <aside class="sidebar" style={`width:${sidebarWidth}px`}>
-      <div class="sidebar-title">连接</div>
+      <div class="sidebar-title">
+        连接
+        {#if connId}
+          <button
+            class="db-add-btn"
+            onclick={openDbDialog}
+            title="新建数据库"
+            aria-label="新建数据库"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+          </button>
+        {/if}
+      </div>
       {#if connId}
         <div class="tree">
           {#each dbs as db}
@@ -2366,6 +2411,44 @@
           <div class="field-actions" style="margin-top: 18px">
             <button onclick={() => (updateInfo = null)}>稍后再说</button>
             <button onclick={doOpenUpdate} class="primary">⬇ 前往下载</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ============ 新建数据库弹窗 ============ -->
+  {#if showDbDialog}
+    <div class="overlay" role="presentation" onclick={() => (showDbDialog = false)}>
+      <div
+        class="conn-dialog db-dialog"
+        role="dialog"
+        aria-label="新建数据库"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.key === 'Escape' && (showDbDialog = false)}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">🗄 新建数据库</span>
+          <button class="dialog-close" onclick={() => (showDbDialog = false)}>×</button>
+        </div>
+        <div class="dialog-body">
+          <div class="field">
+            <label for="ndb-name">数据库名</label>
+            <input id="ndb-name" bind:value={newDbName} placeholder="如 my_database" />
+          </div>
+          <div class="field" style="margin-top: 12px">
+            <label for="ndb-enc">字符集</label>
+            <select id="ndb-enc" bind:value={newDbEncoding}>
+              <option value="UTF8">UTF8（默认）</option>
+              <option value="GBK">GBK（中文）</option>
+              <option value="LATIN1">LATIN1</option>
+              <option value="">跟随模板库</option>
+            </select>
+          </div>
+          <div class="field-actions" style="margin-top: 18px">
+            <button onclick={() => (showDbDialog = false)}>取消</button>
+            <button onclick={doCreateDb} class="primary">创建</button>
           </div>
         </div>
       </div>
@@ -3210,6 +3293,9 @@
   }
 
   .sidebar-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 8px 12px;
     font-size: 11px;
     color: #6b7484;
@@ -3218,6 +3304,35 @@
     position: sticky;
     top: 0;
     background: #191c22;
+  }
+
+  .db-add-btn {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 5px;
+    color: #8b93a3;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+  }
+
+  .db-add-btn:hover {
+    background: #262b36;
+    color: #e8ebf0;
+  }
+
+  .db-add-btn svg {
+    width: 13px;
+    height: 13px;
+  }
+
+  /* 新建数据库弹窗 */
+  .db-dialog {
+    width: 400px;
   }
 
   .tree {
