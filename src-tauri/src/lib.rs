@@ -1626,6 +1626,16 @@ async fn execute_sql(
 }
 
 #[tauri::command]
+async fn open_url(url: String) -> Result<(), String> {
+    // macOS 系统默认浏览器打开（零依赖）
+    std::process::Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map_err(|e| format!("打开链接失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn compare_schemas(
     state: State<'_, AppState>,
     conn_id: String,
@@ -3688,7 +3698,8 @@ pub fn run() {
             drop_view,
             list_indexes,
             compare_schemas,
-            execute_sql
+            execute_sql,
+            open_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

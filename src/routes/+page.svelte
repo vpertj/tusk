@@ -689,6 +689,62 @@
     syncBusy = false;
   }
 
+  // ===== 检查更新（GitHub Releases） =====
+  const APP_VERSION = '1.0.0';
+  const UPDATE_URL = 'https://api.github.com/repos/vpertj/tusk/releases/latest';
+  let updateInfo = $state<{ version: string; notes: string; url: string } | null>(null);
+  let updateCheckMsg = $state('');
+
+  function verCmp(a: string, b: string): number {
+    const pa = a.replace(/^v/i, '').split('.').map(Number);
+    const pb = b.replace(/^v/i, '').split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      const x = pa[i] ?? 0;
+      const y = pb[i] ?? 0;
+      if (x !== y) return x - y;
+    }
+    return 0;
+  }
+
+  async function checkUpdate(silent = false) {
+    updateCheckMsg = '';
+    try {
+      const res = await fetch(UPDATE_URL);
+      if (!res.ok) {
+        if (!silent) updateCheckMsg = `检查更新失败（HTTP ${res.status}）`;
+        return;
+      }
+      const rel = await res.json();
+      const latest = (rel.tag_name ?? '').replace(/^v/i, '');
+      if (verCmp(latest, APP_VERSION) > 0) {
+        updateInfo = {
+          version: latest,
+          notes: rel.body ?? '',
+          url: rel.html_url ?? `https://github.com/vpertj/tusk/releases/tag/v${latest}`,
+        };
+      } else if (!silent) {
+        updateCheckMsg = `已是最新版本 v${APP_VERSION} ✅`;
+      }
+    } catch (e) {
+      if (!silent) updateCheckMsg = `检查更新失败: ${e}`;
+    }
+  }
+
+  async function doOpenUpdate() {
+    if (!updateInfo) return;
+    await invoke('open_url', { url: updateInfo.url });
+    updateInfo = null;
+  }
+
+  // 启动 5 秒后静默检查一次
+  setTimeout(() => {
+    try {
+      checkUpdate(true);
+    } catch {
+      // 静默失败
+    }
+  }, 5000);
+
   // ================= 标签页工作区 =================
   interface QueryResultView {
     columns: { name: string; type_name: string }[];
@@ -2188,6 +2244,40 @@
     </div>
   {/if}
 
+  <!-- ============ 发现新版本弹窗 ============ -->
+  {#if updateInfo}
+    <div class="overlay" role="presentation" onclick={() => (updateInfo = null)}>
+      <div
+        class="conn-dialog update-dialog"
+        role="dialog"
+        aria-label="发现新版本"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+      >
+        <div class="dialog-head">
+          <span class="dialog-title">🚀 发现新版本 v{updateInfo.version}</span>
+          <button class="dialog-close" onclick={() => (updateInfo = null)}>×</button>
+        </div>
+        <div class="dialog-body">
+          <p class="update-desc">
+            当前版本 <b>v{APP_VERSION}</b>，最新版本 <b>v{updateInfo.version}</b>，建议更新。
+          </p>
+          {#if updateInfo.notes.trim()}
+            <div class="update-notes">
+              {#each updateInfo.notes.split('\n') as line}
+                <div>{line}</div>
+              {/each}
+            </div>
+          {/if}
+          <div class="field-actions" style="margin-top: 18px">
+            <button onclick={() => (updateInfo = null)}>稍后再说</button>
+            <button onclick={doOpenUpdate} class="primary">⬇ 前往下载</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- ============ 设置弹窗 ============ -->
   {#if showSettings}
     <div class="overlay" role="presentation" onclick={() => (showSettings = false)}>
@@ -2207,6 +2297,16 @@
           <div class="field">
             <label for="s-ps">数据页每页行数（10-500）</label>
             <input id="s-ps" type="number" min="10" max="500" bind:value={settingsPageSize} />
+          </div>
+          <div class="field" style="margin-top: 14px">
+            <label>检查更新</label>
+            <div class="update-row">
+              <span class="ver-tag">当前 v{APP_VERSION}</span>
+              <button onclick={() => checkUpdate(false)}>🔍 检查更新</button>
+            </div>
+            {#if updateCheckMsg}
+              <div class="update-msg">{updateCheckMsg}</div>
+            {/if}
           </div>
           <div class="field-actions" style="margin-top:18px">
             <button onclick={() => (showSettings = false)}>取消</button>
@@ -3036,6 +3136,50 @@
     font-size: 11px;
     font-weight: 400;
     margin-left: 6px;
+  }
+
+  /* 检查更新 */
+  .update-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .ver-tag {
+    color: #8b93a3;
+    font-size: 12px;
+    background: #242833;
+    border: 1px solid #363b47;
+    border-radius: 10px;
+    padding: 2px 10px;
+  }
+
+  .update-msg {
+    color: #8b93a3;
+    font-size: 12px;
+    padding-top: 6px;
+  }
+
+  .update-dialog {
+    width: 440px;
+  }
+
+  .update-desc {
+    color: #d7dae0;
+    font-size: 13px;
+    margin: 0 0 10px;
+  }
+
+  .update-notes {
+    background: #1c2029;
+    border: 1px solid #2c303a;
+    border-radius: 6px;
+    padding: 10px 12px;
+    max-height: 180px;
+    overflow-y: auto;
+    color: #aab2c0;
+    font-size: 12px;
+    white-space: pre-wrap;
   }
 
   /* 结构同步弹窗 */
