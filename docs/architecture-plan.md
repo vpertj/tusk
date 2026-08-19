@@ -32,24 +32,21 @@ lib.rs(4185 行)→ 薄壳(57 行)+ models.rs + state.rs + db/pg.rs。
 
 ---
 
-# P1 功能路线(下一步)
+# P1 功能路线(执行中)
 
-## P1-1 数据导入 CSV(导出闭环,复用 COPY 流式)
-- Rust:`import_csv_core`(解析 CSV → COPY 流式灌入目标表,列名映射,类型宽松)
-- command `import_csv(connId, dbname, table, path)`
-- 前端:表页签工具栏「导入」按钮 → 文件选择 → 预览前几行 → 确认导入
-- TDD:临时表导入 → 断言行数/值
-- SQLite 同步支持(简单 INSERT 循环)
+## ✅ P1-1 数据导入 CSV(已完成, commit 55f39ac)
+- PG:COPY 流式(表头列匹配/引号转义/空值→NULL/事务),SQLite 逐行 INSERT 事务
+- command import_csv 注册 + 前端表页签工具栏「⤒ 导入 CSV」(文件选择→导入→自动刷新)
+- TDD:test_import_csv(乱序表头/中文逗号/空值/无匹配报错)
 
-## P1-2 查询历史(低成本高感知)
-- localStorage 存最近 N 条,查询页签下拉历史(↑/↓ 已有部分)
-- 设置面板可清空
+## ✅ P1-2 查询历史可视化(已完成, commit 1375f82)
+- 存储逻辑原有(50 条去重 localStorage + ↑↓ 切换),补「🕘 历史」下拉面板(点击回填/清空)
 
-## P1-3 SSH 隧道(远程刚需)
-- russh 依赖,连接配置加 SSH 选项(host/port/user/key/pass)
+## ⏳ P1-3 SSH 隧道(待做,独立一轮)
+- russh 依赖,连接配置加 SSH 选项(host/port/user/key/pass),本地端口转发
 
-## P1-4 多结果集页签(PG 多语句)
-- MultiResult 已返回多结果,前端分页签展示
+## ✅ P1-4 多结果集(原已实现,无需开发)
+- MultiResult → 前端逐结果渲染 + 序号计数
 
 ## P2(差异化):ER 图 / EXPLAIN 可视化 / 备份恢复(pg_dump)
 
