@@ -387,6 +387,11 @@ mod tests {
                 password: String::new(),
                 dbname: String::new(),
                 path: path.into(),
+                ssh_enabled: false,
+                ssh_host: String::new(),
+                ssh_port: 0,
+                ssh_user: String::new(),
+                ssh_pass: String::new(),
             },
             sqlite: Some(Arc::new(TokioMutex::new(conn))),
         }

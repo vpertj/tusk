@@ -12,11 +12,25 @@ use crate::state::*;
 
 /// 核心：建立 PostgreSQL 连接，返回可跨任务共享的 client 与服务器版本
 async fn open_connection(cfg: &ConnConfig) -> Result<(Arc<Client>, String), String> {
+    // SSH 隧道：句柄必须随 connection task 保活
+    let mut ssh_keep: Option<crate::db::ssh::SshTunnel> = None;
+
     // libpq conninfo：空 password 字段会破坏解析，为空时省略，非空时加引号
-    let mut conn_str = format!(
-        "host={} port={} user={} dbname={}",
-        cfg.host, cfg.port, cfg.user, cfg.dbname
-    );
+    let mut conn_str;
+    if cfg.ssh_enabled {
+        let tunnel = crate::db::ssh::open_tunnel(cfg, &cfg.ssh_pass).await?;
+        let port = tunnel.local_port;
+        ssh_keep = Some(tunnel);
+        conn_str = format!(
+            "host=127.0.0.1 port={port} user={} dbname={}",
+            cfg.user, cfg.dbname
+        );
+    } else {
+        conn_str = format!(
+            "host={} port={} user={} dbname={}",
+            cfg.host, cfg.port, cfg.user, cfg.dbname
+        );
+    }
     if !cfg.password.is_empty() {
         let pw = cfg.password.replace('\'', "\\'");
         conn_str = format!("{conn_str} password='{pw}'");
@@ -28,6 +42,7 @@ async fn open_connection(cfg: &ConnConfig) -> Result<(Arc<Client>, String), Stri
 
     // connection task 必须在后台驱动，否则查询不工作
     tokio::spawn(async move {
+        let _keep = ssh_keep;
         if let Err(e) = connection.await {
             eprintln!("[tusk] postgres connection error: {e}");
         }
@@ -98,6 +113,11 @@ pub async fn connect(
     password: String,
     dbname: String,
     path: String,
+    ssh_enabled: bool,
+    ssh_host: String,
+    ssh_port: u16,
+    ssh_user: String,
+    ssh_pass: String,
 ) -> Result<ConnectionInfo, String> {
     let cfg = ConnConfig {
         db_type,
@@ -107,6 +127,11 @@ pub async fn connect(
         password,
         dbname,
         path,
+        ssh_enabled,
+        ssh_host,
+        ssh_port,
+        ssh_user,
+        ssh_pass,
     };
     if cfg.is_sqlite() {
         return crate::db::sqlite::connect(state, cfg).await;
@@ -904,6 +929,11 @@ async fn connect_saved_core(name: &str) -> Result<(ConnConfig, String), String> 
             password: password.clone(),
             dbname: conn.dbname.clone(),
             path: conn.path.clone().unwrap_or_default(),
+            ssh_enabled: conn.ssh_enabled,
+            ssh_host: conn.ssh_host.clone(),
+            ssh_port: conn.ssh_port,
+            ssh_user: conn.ssh_user.clone(),
+            ssh_pass: conn.ssh_pass.clone(),
         },
         password,
     ))
@@ -921,6 +951,11 @@ pub async fn save_connection(
     password: String,
     dbname: String,
     path: String,
+    ssh_enabled: bool,
+    ssh_host: String,
+    ssh_port: u16,
+    ssh_user: String,
+    ssh_pass: String,
 ) -> Result<(), String> {
     let conn = SavedConn {
         db_type,
@@ -934,6 +969,11 @@ pub async fn save_connection(
         } else {
             Some(path)
         },
+        ssh_enabled,
+        ssh_host,
+        ssh_port,
+        ssh_user,
+        ssh_pass,
     };
     let pw = if password.trim().is_empty() {
         None
@@ -2783,6 +2823,11 @@ mod tests {
             password: String::new(),
             dbname: "tusk_demo".into(),
             path: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            ssh_user: String::new(),
+            ssh_pass: String::new(),
         }
     }
 
@@ -3007,6 +3052,11 @@ mod tests {
             user: whoami().into(),
             dbname: "tusk_demo".into(),
             path: None,
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            ssh_user: String::new(),
+            ssh_pass: String::new(),
         };
 
         // 保存 → 列表
@@ -4178,13 +4228,43 @@ mod tests {
         admin.execute(&format!("CREATE DATABASE \"{src}\""), &[]).await.unwrap();
         admin.execute(&format!("CREATE DATABASE \"{dst}\""), &[]).await.unwrap();
         // 源库建表 + 插数据
-        let (src_c, _) = open_connection(&ConnConfig { db_type: "postgres".into(), host: cfg.host.clone(), port: cfg.port, user: cfg.user.clone(), password: cfg.password.clone(), dbname: src.clone(), path: String::new() }).await.unwrap();
+        let (src_c, _) = open_connection(&ConnConfig {
+            db_type: "postgres".into(),
+            host: cfg.host.clone(),
+            port: cfg.port,
+            user: cfg.user.clone(),
+            password: cfg.password.clone(),
+            dbname: src.clone(),
+            path: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            ssh_user: String::new(),
+            ssh_pass: String::new(),
+        })
+        .await
+        .unwrap();
         src_c.execute("CREATE TABLE t1 (id serial primary key, name text, price numeric(10,2))", &[]).await.unwrap();
         src_c.execute("INSERT INTO t1 (name, price) VALUES ('a', 1.5), ('b', 2.75), ('c', NULL)", &[]).await.unwrap();
         src_c.execute("CREATE TABLE t2 (id int primary key, note text)", &[]).await.unwrap();
         src_c.execute("INSERT INTO t2 VALUES (1, 'x'), (2, 'y')", &[]).await.unwrap();
         // 目标库建同结构空表
-        let (dst_c, _) = open_connection(&ConnConfig { db_type: "postgres".into(), host: cfg.host.clone(), port: cfg.port, user: cfg.user.clone(), password: cfg.password.clone(), dbname: dst.clone(), path: String::new() }).await.unwrap();
+        let (dst_c, _) = open_connection(&ConnConfig {
+            db_type: "postgres".into(),
+            host: cfg.host.clone(),
+            port: cfg.port,
+            user: cfg.user.clone(),
+            password: cfg.password.clone(),
+            dbname: dst.clone(),
+            path: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            ssh_user: String::new(),
+            ssh_pass: String::new(),
+        })
+        .await
+        .unwrap();
         dst_c.execute("CREATE TABLE t1 (id serial primary key, name text, price numeric(10,2))", &[]).await.unwrap();
         dst_c.execute("CREATE TABLE t2 (id int primary key, note text)", &[]).await.unwrap();
         // 同步数据

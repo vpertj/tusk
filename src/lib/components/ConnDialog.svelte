@@ -10,6 +10,11 @@
     user,
     password,
     dbname,
+    sshEnabled,
+    sshHost,
+    sshPort,
+    sshUser,
+    sshPass,
     connName,
     saveConn,
     pgHelp,
@@ -110,6 +115,36 @@
                 <div class="field">
                   <label for="f-db">数据库名</label>
                   <input id="f-db" bind:value={dbname} placeholder="postgres" />
+                </div>
+                <div class="ssh-block">
+                  <label class="save-label">
+                    通过 SSH 隧道连接
+                    <input type="checkbox" bind:checked={sshEnabled} />
+                  </label>
+                  {#if sshEnabled}
+                    <div class="field">
+                      <label for="f-ssh-host">SSH 主机</label>
+                      <input id="f-ssh-host" bind:value={sshHost} placeholder="跳板机 IP / 域名" />
+                    </div>
+                    <div class="field">
+                      <label for="f-ssh-port">SSH 端口</label>
+                      <input id="f-ssh-port" bind:value={sshPort} type="number" placeholder="22" />
+                    </div>
+                    <div class="field">
+                      <label for="f-ssh-user">SSH 用户</label>
+                      <input id="f-ssh-user" bind:value={sshUser} placeholder="root" />
+                    </div>
+                    <div class="field">
+                      <label for="f-ssh-pass">SSH 密码</label>
+                      <input
+                        id="f-ssh-pass"
+                        bind:value={sshPass}
+                        type="password"
+                        placeholder="留空则尝试 ~/.ssh 私钥"
+                      />
+                    </div>
+                    <p class="ssh-hint">连接地址/端口为内网 PG 目标，经跳板机隧道转发</p>
+                  {/if}
                 </div>
               {:else if dbType === 'sqlite'}
                 <div class="field">
@@ -268,6 +303,29 @@
     background-position: calc(100% - 16px) 55%, calc(100% - 11px) 55%;
     background-size: 5px 5px;
     background-repeat: no-repeat;
+  }
+
+  .field + .ssh-block {
+    margin-top: 6px;
+  }
+
+  .ssh-block {
+    padding: 10px 12px;
+    border: 1px dashed #2c303a;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .ssh-block .field {
+    margin: 0;
+  }
+
+  .ssh-hint {
+    font-size: 11px;
+    color: #6b7484;
+    margin: 0;
   }
 
   .field-actions {

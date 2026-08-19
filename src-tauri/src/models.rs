@@ -39,6 +39,12 @@ pub struct ConnConfig {
     pub dbname: String,
     /// SQLite 文件路径（db_type == "sqlite" 时使用）
     pub path: String,
+    /// SSH 隧道（跳板机端口转发，仅 postgres 生效）
+    pub ssh_enabled: bool,
+    pub ssh_host: String,
+    pub ssh_port: u16,
+    pub ssh_user: String,
+    pub ssh_pass: String,
 }
 
 impl ConnConfig {
@@ -107,6 +113,17 @@ pub struct SavedConn {
     /// SQLite 文件路径（db_type == "sqlite" 时使用）
     #[serde(default)]
     pub path: Option<String>,
+    /// SSH 隧道配置（老数据缺失时全部走默认 = 关闭）
+    #[serde(default)]
+    pub ssh_enabled: bool,
+    #[serde(default)]
+    pub ssh_host: String,
+    #[serde(default)]
+    pub ssh_port: u16,
+    #[serde(default)]
+    pub ssh_user: String,
+    #[serde(default)]
+    pub ssh_pass: String,
 }
 
 

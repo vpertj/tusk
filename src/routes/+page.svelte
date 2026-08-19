@@ -43,6 +43,11 @@
   let dbname = $state('postgres');
   let dbType = $state('postgres');
   let sqlitePath = $state('');
+  let sshEnabled = $state(false);
+  let sshHost = $state('');
+  let sshPort = $state<number>(22);
+  let sshUser = $state('');
+  let sshPass = $state('');
   let showConnPanel = $state(true);
   let connName = $state('');
   let saveConn = $state(true);
@@ -1202,11 +1207,16 @@
         password,
         dbname,
         path: sqlitePath,
+        sshEnabled,
+        sshHost,
+        sshPort,
+        sshUser,
+        sshPass,
       });
       connId = info.id;
       version = info.version;
       connMeta = { user: info.user, host: info.host, port: info.port, version: info.version };
-      status = `已连接 · ${dbType === 'sqlite' ? info.host : `${user}@${host}:${port}`}`;
+      status = `已连接 · ${dbType === 'sqlite' ? info.host : `${user}@${host}:${port}`}${sshEnabled ? ' · SSH 隧道' : ''}`;
       showConnPanel = false;
       ensureTab();
       await loadDbs();
@@ -1223,6 +1233,11 @@
             password,
             dbname,
             path: sqlitePath,
+            sshEnabled,
+            sshHost,
+            sshPort,
+            sshUser,
+            sshPass,
           });
           await loadSavedConns();
         } catch {
@@ -1779,6 +1794,11 @@
       {user}
       {password}
       {dbname}
+      {sshEnabled}
+      {sshHost}
+      {sshPort}
+      {sshUser}
+      {sshPass}
       {connName}
       {saveConn}
       {pgHelp}
