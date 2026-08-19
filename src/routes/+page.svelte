@@ -1,5 +1,9 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+	import Header from '../lib/components/Header.svelte';
+	import Footer from '../lib/components/Footer.svelte';
+	import ConnDialog from '../lib/components/ConnDialog.svelte';
+	import Sidebar from '../lib/components/Sidebar.svelte';
   import { listen } from '@tauri-apps/api/event';
   import { format as formatSql } from 'sql-formatter';
   import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
@@ -1707,352 +1711,68 @@
 
 <div class="app">
   <!-- ============ 顶部工具栏 ============ -->
-  <header>
-    <div class="toolbar">
-      <div class="grp">
-        <button onclick={openNewTab} disabled={!connId} data-tip="新建查询 (⌘N)" aria-label="新建查询">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-            <polyline points="14 2 14 8 20 8" />
-            <line x1="12" y1="18" x2="12" y2="12" />
-            <line x1="9" y1="15" x2="15" y2="15" />
-          </svg>
-        </button>
-        <input
-          type="file"
-          accept=".sql,.txt,text/plain"
-          id="sql-file-input"
-          hidden
-          onchange={onSqlFilePicked}
-        />
-        <button
-          onclick={() => document.getElementById('sql-file-input')?.click()}
-          disabled={!connId}
-          data-tip="打开 .sql 文件" aria-label="打开 SQL 文件"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-          </svg>
-        </button>
-      </div>
-      <div class="sep"></div>
-      <div class="grp">
-        <button onclick={openDesigner} disabled={!connId} data-tip="新建表" aria-label="新建表">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="7" height="7" />
-            <rect x="14" y="3" width="7" height="7" />
-            <rect x="14" y="14" width="7" height="7" />
-            <rect x="3" y="14" width="7" height="7" />
-          </svg>
-        </button>
-        <button onclick={openViewDialog} disabled={!connId} data-tip="新建视图" aria-label="新建视图">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-            <circle cx="12" cy="12" r="3" />
-          </svg>
-        </button>
-        <button onclick={openSyncDialog} disabled={!connId} data-tip="结构同步" aria-label="结构同步">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="23 4 23 10 17 10" />
-            <polyline points="1 20 1 14 7 14" />
-            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-          </svg>
-        </button>
-      </div>
-      <div class="sep"></div>
-      <div class="grp">
-        <button onclick={loadDbs} disabled={!connId} data-tip="刷新对象树" aria-label="刷新对象树">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="23 4 23 10 17 10" />
-            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-          </svg>
-        </button>
-        <button onclick={() => { searchOpen = true; }} disabled={!connId} data-tip="搜索对象 (⌘F)" aria-label="搜索对象">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="8" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
-        </button>
-      </div>
-      <div class="spacer"></div>
-      <div class="grp">
-        {#if connId}
-          <button onclick={doDisconnect} class="danger" title="断开连接">断开</button>
-        {:else}
-          <button onclick={() => (showConnPanel = !showConnPanel)} class="primary" title="连接数据库">连接</button>
-        {/if}
-      </div>
-    </div>
-  </header>
+    <Header
+      {connId}
+      {openNewTab}
+      {onSqlFilePicked}
+      {openDesigner}
+      {openViewDialog}
+      {openSyncDialog}
+      {loadDbs}
+      openSearch={() => (searchOpen = true)}
+      toggleConnPanel={() => (showConnPanel = !showConnPanel)}
+      {doDisconnect}
+    />
 
   <main>
-    <!-- ============ 连接管理弹窗 ============ -->
-    {#if showConnPanel}
-      <div class="overlay" role="presentation" onclick={() => (showConnPanel = false)}>
-        <div
-          class="conn-dialog"
-          role="dialog"
-          aria-label="连接数据库"
-          tabindex="-1"
-          onclick={(e) => e.stopPropagation()}
-          onkeydown={(e) => e.key === 'Escape' && (showConnPanel = false)}
-        >
-          <div class="dialog-head">
-            <span class="dialog-title">🔌 连接数据库</span>
-            <button class="dialog-close" onclick={() => (showConnPanel = false)}>×</button>
-          </div>
-          <div class="dialog-body">
-            {#if savedConns.length > 0}
-              <div class="saved-title">已保存的连接</div>
-              {#each savedConns as sc}
-                <div class="saved-item">
-                  <button
-                    class="saved-connect"
-                    onclick={() => connectSaved(sc.name)}
-                    disabled={connecting}
-                  >
-                    <span class="conn-ico">🔌</span>
-                    <span class="conn-main">
-                      <span class="conn-name">{sc.name}</span>
-                      <span class="conn-sub">
-                        <span class="badge">{sc.db_type === 'mysql' ? 'MySQL' : 'PG'}</span>
-                        {sc.user}@{sc.host}:{sc.port} · {sc.dbname}
-                      </span>
-                    </span>
-                  </button>
-                  <button
-                    class="saved-del"
-                    onclick={() => deleteSaved(sc.name)}
-                    title="删除该连接"
-                    >×</button
-                  >
-                </div>
-              {/each}
-              <div class="divider"></div>
-            {/if}
-            <div class="saved-title">新建连接</div>
-            <div class="conn-form-v">
-              <div class="field">
-                <label for="f-dbtype">数据库类型</label>
-                <select id="f-dbtype" bind:value={dbType}>
-                  <option value="postgres">PostgreSQL 🐘</option>
-                  <option value="mysql" disabled>MySQL（即将支持）</option>
-                </select>
-              </div>
-              <div class="field">
-                <label for="f-host">连接地址</label>
-                <input id="f-host" bind:value={host} placeholder="localhost" />
-              </div>
-              <div class="field">
-                <label for="f-port">端口</label>
-                <input id="f-port" bind:value={port} type="number" placeholder="5432" />
-              </div>
-              <div class="field">
-                <label for="f-user">用户名</label>
-                <input id="f-user" bind:value={user} placeholder="postgres" />
-              </div>
-              <div class="field">
-                <label for="f-pass">密码</label>
-                <input id="f-pass" bind:value={password} type="password" placeholder="留空表示免密" />
-              </div>
-              <div class="field">
-                <label for="f-db">数据库名</label>
-                <input id="f-db" bind:value={dbname} placeholder="postgres" />
-              </div>
-              <div class="field">
-                <label for="f-cname">连接名</label>
-                <input id="f-cname" bind:value={connName} placeholder="保存后一键连接（可选）" />
-              </div>
-              <div class="field-actions">
-                <label class="save-label">
-                  保存此连接
-                  <input type="checkbox" bind:checked={saveConn} />
-                </label>
-                <button onclick={doConnect} disabled={connecting} class="primary">
-                  {connecting ? '连接中…' : '连接'}
-                </button>
-              </div>
-              {#if pgHelp}
-                <div class="pg-help">
-                  <div class="pg-help-title">🐘 未检测到本机 PostgreSQL 服务</div>
-                  <p class="pg-help-desc">
-                    看起来本机 PostgreSQL 未安装或未启动。在「终端」中执行以下命令（按顺序），然后重新连接：
-                  </p>
-                  <div class="pg-help-cmd">
-                    <code>{PG_INSTALL_CMD}</code>
-                    <button onclick={() => copyCmd(PG_INSTALL_CMD)} title="复制命令">⧉ 复制</button>
-                  </div>
-                  <div class="pg-help-cmd">
-                    <code>{PG_START_CMD}</code>
-                    <button onclick={() => copyCmd(PG_START_CMD)} title="复制命令">⧉ 复制</button>
-                  </div>
-                  <p class="pg-help-note">已安装但没启动？执行第二条命令即可。Windows 用户请安装官方 PostgreSQL 安装包。</p>
-                </div>
-              {/if}
-            </div>
-          </div>
-        </div>
-      </div>
-    {/if}
+    <ConnDialog
+      {showConnPanel}
+      {savedConns}
+      {connecting}
+      {dbType}
+      {host}
+      {port}
+      {user}
+      {password}
+      {dbname}
+      {connName}
+      {saveConn}
+      {pgHelp}
+      PG_INSTALL_CMD={PG_INSTALL_CMD}
+      PG_START_CMD={PG_START_CMD}
+      close={() => (showConnPanel = false)}
+      {connectSaved}
+      {deleteSaved}
+      {doConnect}
+      {copyCmd}
+    />
 
     <!-- ============ 左侧对象树 ============ -->
-    <aside
-      class="sidebar"
-      style={`width:${sidebarWidth}px`}
-      oncontextmenu={openBlankMenu}
-    >
-      <div class="sidebar-title">
-        连接
-        <button
-          class="db-add-btn"
-          onclick={() => (showConnPanel = true)}
-          data-tip="新建连接"
-          aria-label="新建连接"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-        </button>
-      </div>
-      {#if connNodes.length > 0}
-        <div class="tree">
-          {#each connNodes as c}
-            <div class="tree-node">
-              <div
-                class="tree-row conn-row"
-                class:active={c.id === connId}
-                role="button"
-                tabindex="0"
-                onclick={() => connRowClick(c)}
-                oncontextmenu={(e) => openConnMenu(e, c)}
-                onkeydown={(e) => e.key === 'Enter' && connRowClick(c)}
-              >
-                <span class="arrow">{c.connected && c.expanded ? '▾' : '▸'}</span>
-                <span class="ico conn-dot" class:ok={c.connected}>{c.connected ? '●' : '○'}</span>
-                <span class="label">{c.name}</span>
-                {#if c.connected}<span class="conn-host">{c.host}:{c.port}</span>{/if}
-                {#if c.connected && c.id === connId}
-                  <button
-                    class="db-add-btn"
-                    onclick={(e) => {
-                      e.stopPropagation();
-                      openDbDialog();
-                    }}
-                    data-tip="新建数据库"
-                    aria-label="新建数据库"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <line x1="12" y1="5" x2="12" y2="19" />
-                      <line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
-                  </button>
-                {/if}
-              </div>
-              {#if c.connected && c.expanded}
-                <div class="tree-children">
-                  {#each connDbs[c.id] ?? [] as db}
-                    <div class="tree-node">
-                      <div
-                        class="tree-row"
-                        class:open={treeOpen[ck(c.id, db.name)]}
-                        role="button"
-                        tabindex="0"
-                        onclick={() => toggleDb(c.id, db.name)}
-                        oncontextmenu={(e) => openDbMenu(e, c.id, db.name)}
-                        onkeydown={(e) => e.key === 'Enter' && toggleDb(c.id, db.name)}
-                      >
-                        <span class="arrow">{treeOpen[ck(c.id, db.name)] ? '▾' : '▸'}</span>
-                        <span class="ico">🗄</span>
-                        <span class="label">{db.name}</span>
-                        {#if loadingKey === ck(c.id, db.name)}<span class="spin">…</span>{/if}
-                      </div>
-                      {#if treeOpen[ck(c.id, db.name)] && tables[ck(c.id, db.name)]}
-                        <div class="tree-children">
-                          {#each tables[ck(c.id, db.name)] as tb}
-                            <div class="tree-node">
-                              <div
-                                class="tree-row"
-                                class:open={treeOpen[ck(c.id, `${db.name}.${tb.name}`)]}
-                                role="button"
-                                tabindex="0"
-                                onclick={() => openTableTab(c.id, db.name, tb.name)}
-                                onkeydown={(e) => e.key === 'Enter' && openTableTab(c.id, db.name, tb.name)}
-                                oncontextmenu={(e) => openTableMenu(e, c.id, db.name, tb.name, tb.kind)}
-                              >
-                                <span
-                                  class="arrow"
-                                  role="button"
-                                  tabindex="0"
-                                  onclick={(e) => {
-                                    e.stopPropagation();
-                                    toggleTable(c.id, db.name, tb.name);
-                                  }}
-                                  onkeydown={(e) => {
-                                    e.stopPropagation();
-                                    if (e.key === 'Enter') toggleTable(c.id, db.name, tb.name);
-                                  }}
-                                  >{treeOpen[ck(c.id, `${db.name}.${tb.name}`)] ? '▾' : '▸'}</span
-                                >
-                                <span class="ico">{tb.kind === 'view' ? '👁' : '📋'}</span>
-                                <span class="label">{tb.name}</span>
-                                {#if loadingKey === ck(c.id, `${db.name}.${tb.name}`)}<span class="spin">…</span>{/if}
-                                {#if tb.kind === 'table'}
-                                  <button
-                                    class="tree-del"
-                                    onclick={(e) => {
-                                      e.stopPropagation();
-                                      openDesignerForEdit(c.id, db.name, tb.name);
-                                    }}
-                                    data-tip="编辑表结构"
-                                    aria-label="编辑表结构"
-                                    >✎</button
-                                  >
-                                {/if}
-                                <button
-                                  class="tree-del"
-                                  onclick={(e) => {
-                                    e.stopPropagation();
-                                    if (tb.kind === 'view') {
-                                      dropViewFromTree(c.id, db.name, tb.name);
-                                    } else {
-                                      dropTableFromTree(c.id, db.name, tb.name);
-                                    }
-                                  }}
-                                  data-tip="删除（不可恢复）"
-                                  aria-label="删除"
-                                  >🗑</button
-                                >
-                              </div>
-                              {#if treeOpen[ck(c.id, `${db.name}.${tb.name}`)] && columns[ck(c.id, `${db.name}.${tb.name}`)]}
-                                <div class="tree-children">
-                                  {#each columns[ck(c.id, `${db.name}.${tb.name}`)] as col}
-                                    <div class="tree-row leaf">
-                                      <span class="ico">{col.is_pk ? '🔑' : '▫'}</span>
-                                      <span class="label">{col.name}</span>
-                                      <span class="type">{col.type_name}</span>
-                                    </div>
-                                  {/each}
-                                </div>
-                              {/if}
-                            </div>
-                          {/each}
-                        </div>
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      {:else}
-        <div class="empty-tree">在「连接管理」中保存连接，双击连接展开数据库</div>
-      {/if}
-    </aside>
-
-    <!-- 侧栏拖拽手柄 -->
-    <div class="sidebar-resizer" role="presentation" onmousedown={startSidebarResize}></div>
+    <Sidebar
+      {sidebarWidth}
+      {connNodes}
+      {connDbs}
+      {tables}
+      {treeOpen}
+      {columns}
+      {loadingKey}
+      {connId}
+      {openBlankMenu}
+      openConnPanel={() => (showConnPanel = true)}
+      {connRowClick}
+      {openConnMenu}
+      {openDbDialog}
+      {toggleDb}
+      {openDbMenu}
+      {toggleTable}
+      {openTableTab}
+      {openTableMenu}
+      {openDesignerForEdit}
+      {dropViewFromTree}
+      {dropTableFromTree}
+      {ck}
+      {startSidebarResize}
+    />
 
     <!-- ============ 中央标签页工作区 ============ -->
     <section class="workspace">
@@ -3275,26 +2995,7 @@
   {/if}
 
   <!-- ============ 底部状态栏 ============ -->
-  <footer>
-    <button class="footer-settings" onclick={openSettings} title="设置" aria-label="设置">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-      </svg>
-    </button>
-    {#if connId}
-      <span class="conn-info">
-        <span class="conn-ok">已连接</span>
-        · {connMeta.user}@{connMeta.host}:{connMeta.port} {connMeta.version.replace(/ on .*$/, '')}
-      </span>
-    {:else}
-      <span>未连接</span>
-    {/if}
-    <span class="spacer"></span>
-    <img src="/tusk-icon.png" class="footer-logo" alt="Tusk" />
-    <span class="footer-app-name">Tusk</span>
-    <span class="footer-ver">v{APP_VERSION}</span>
-  </footer>
+    <Footer {connId} {connMeta} appVersion={APP_VERSION} {openSettings} />
 </div>
 
 <style>
@@ -3314,173 +3015,6 @@
   }
 
   /* ===== 顶部工具栏 ===== */
-  header {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 8px 14px;
-    background: #1e2128;
-    border-bottom: 1px solid #2c303a;
-    position: relative;
-    z-index: 100;
-  }
-
-  .footer-logo {
-    width: 14px;
-    height: 14px;
-    border-radius: 3px;
-    flex-shrink: 0;
-    margin-left: 4px;
-  }
-
-  .footer-app-name {
-    font-size: 11px;
-    font-weight: 600;
-    color: #aab2c0;
-  }
-
-  .footer-ver {
-    font-size: 11px;
-    color: #6b7484;
-    margin-left: 2px;
-  }
-
-  .toolbar {
-    display: flex;
-    align-items: center;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .toolbar .grp {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-
-  .toolbar .sep {
-    width: 1px;
-    height: 18px;
-    background: #2c303a;
-    margin: 0 8px;
-    flex-shrink: 0;
-  }
-
-  .toolbar .spacer {
-    flex: 1;
-  }
-
-  /* 全局按钮：默认幽灵样式，主操作 .primary */
-  button {
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    color: #c3c9d4;
-    padding: 5px 12px;
-    font-size: 12px;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 0.12s ease, color 0.12s ease;
-  }
-
-  button:hover:not(:disabled) {
-    background: #262b36;
-    color: #f0f2f5;
-  }
-
-  button:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  button.primary {
-    background: #2f6fed;
-    border-color: #2f6fed;
-    color: #fff;
-    padding: 5px 16px;
-    font-size: 12px;
-  }
-
-  button.primary:hover:not(:disabled) {
-    background: #4a83f5;
-    border-color: #4a83f5;
-    color: #fff;
-  }
-
-  button.danger {
-    background: #d64545;
-    border-color: #d64545;
-    color: #ffffff;
-    padding: 5px 12px;
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  button.danger:hover:not(:disabled) {
-    background: #e05656;
-    border-color: #e05656;
-    color: #ffffff;
-  }
-
-  /* 工具栏图标按钮 */
-  .toolbar button {
-    width: 30px;
-    height: 30px;
-    padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 6px;
-    color: #9aa3b2;
-  }
-
-  .toolbar button:hover:not(:disabled) {
-    background: #262b36;
-    color: #f0f2f5;
-  }
-
-  .toolbar button.primary,
-  .toolbar button.danger {
-    width: auto;
-    padding: 4px 11px;
-    display: inline-flex;
-    align-items: center;
-    font-size: 11px;
-  }
-
-  .toolbar button svg {
-    width: 16px;
-    height: 16px;
-  }
-
-  /* 工具栏按钮自定义 tooltip（WKWebView 不显示 title） */
-  .toolbar button[data-tip] {
-    position: relative;
-  }
-
-  .toolbar button[data-tip]::after {
-    content: attr(data-tip);
-    position: absolute;
-    top: calc(100% + 14px);
-    left: 50%;
-    transform: translateX(-50%);
-    background: #262b36;
-    border: 1px solid #3a4150;
-    color: #e8ebf0;
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    white-space: nowrap;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.12s ease;
-    z-index: 999;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  }
-
-  .toolbar button[data-tip]:hover::after {
-    opacity: 1;
-  }
 
   .status {
     color: #8b93a3;
@@ -3535,6 +3069,11 @@
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
     display: flex;
     flex-direction: column;
+  }
+
+  /* 新建数据库弹窗 */
+  .db-dialog {
+    width: 400px;
   }
 
   .dialog-head {
@@ -3654,14 +3193,6 @@
     cursor: pointer;
   }
 
-  .save-label input[type='checkbox'] {
-    margin: 0;
-    width: 14px;
-    height: 14px;
-    flex-shrink: 0;
-    accent-color: #4fc3f7;
-    cursor: pointer;
-  }
 
   .saved-title {
     font-size: 11px;
@@ -3772,193 +3303,6 @@
     border-color: #4fc3f7;
   }
 
-  /* ===== 左侧对象树 ===== */
-  .sidebar {
-    background: #191c22;
-    border-right: 1px solid #2c303a;
-    overflow: auto;
-    padding-bottom: 12px;
-    flex-shrink: 0;
-  }
-
-  .sidebar-resizer {
-    width: 5px;
-    cursor: col-resize;
-    flex-shrink: 0;
-    user-select: none;
-  }
-
-  .sidebar-resizer:hover {
-    background: rgba(79, 195, 247, 0.35);
-  }
-
-  .sidebar-title {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px;
-    font-size: 11px;
-    color: #6b7484;
-    letter-spacing: 1px;
-    border-bottom: 1px solid #23262e;
-    position: sticky;
-    top: 0;
-    background: #191c22;
-  }
-
-  .db-add-btn {
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 5px;
-    color: #8b93a3;
-    background: transparent;
-    border: none;
-    cursor: pointer;
-  }
-
-  .db-add-btn:hover {
-    background: #262b36;
-    color: #e8ebf0;
-  }
-
-  .db-add-btn[data-tip] {
-    position: relative;
-  }
-
-  .db-add-btn[data-tip]::after {
-    content: attr(data-tip);
-    position: absolute;
-    top: calc(100% + 14px);
-    left: 50%;
-    transform: translateX(-50%);
-    background: #262b36;
-    border: 1px solid #3a4150;
-    color: #e8ebf0;
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    white-space: nowrap;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.12s ease;
-    z-index: 999;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  }
-
-  .db-add-btn[data-tip]:hover::after {
-    opacity: 1;
-  }
-
-  .db-add-btn svg {
-    width: 13px;
-    height: 13px;
-  }
-
-  /* 新建数据库弹窗 */
-  .db-dialog {
-    width: 400px;
-  }
-
-  .tree {
-    padding: 4px 0;
-  }
-
-  .tree-node {
-    user-select: none;
-  }
-
-  .tree-row {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 12px 3px 8px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .tree-row:hover {
-    background: #242833;
-  }
-
-  /* 连接树节点（Navicat 式） */
-  .conn-row {
-    font-weight: 600;
-    color: #e8ebf0;
-    padding: 5px 12px 5px 8px;
-    border-left: 2px solid transparent;
-  }
-
-  .conn-row.active {
-    border-left-color: #2f6fed;
-    background: #1d2a44;
-  }
-
-  .conn-dot {
-    font-size: 9px;
-    color: #5a6270;
-  }
-
-  .conn-dot.ok {
-    color: #3fbf6a;
-  }
-
-  .conn-host {
-    font-size: 10px;
-    font-weight: 400;
-    color: #6b7484;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 110px;
-  }
-
-  .tree-row.leaf {
-    cursor: default;
-    padding-left: 30px;
-  }
-
-  .tree-row .arrow {
-    width: 12px;
-    color: #5c6472;
-    font-size: 10px;
-  }
-
-  .tree-row .ico {
-    width: 16px;
-    text-align: center;
-  }
-
-  .tree-row .label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .tree-row .type {
-    color: #5c6472;
-    font-size: 10px;
-    margin-left: auto;
-    padding-right: 4px;
-  }
-
-  .tree-children {
-    margin-left: 14px;
-  }
-
-  .spin {
-    color: #4fc3f7;
-    margin-left: 4px;
-  }
-
-  .empty-tree {
-    padding: 20px 12px;
-    color: #4c5462;
-    font-size: 12px;
-  }
-
-  /* ===== 中央工作区 ===== */
   .workspace {
     flex: 1;
     display: flex;
@@ -4501,29 +3845,7 @@
     margin-bottom: 8px;
   }
 
-  .pg-help-cmd code {
-    flex: 1;
-    background: #14171d;
-    border: 1px solid #2c303a;
-    border-radius: 6px;
-    padding: 6px 10px;
-    color: #8fc7f0;
-    font-size: 12px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
 
-  .pg-help-cmd button {
-    background: #262a33;
-    border: 1px solid #363b47;
-    color: #d7dae0;
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
 
   .pg-help-note {
     color: #5c6472;
@@ -4930,27 +4252,6 @@
     background: #2a3b58;
   }
 
-  .tree-row .tree-del {
-    margin-left: auto;
-    background: transparent;
-    border: none;
-    color: #5c6472;
-    font-size: 11px;
-    cursor: pointer;
-    padding: 0 4px;
-    opacity: 0;
-    transition: opacity 0.12s;
-    line-height: 1;
-  }
-
-  .tree-row:hover .tree-del {
-    opacity: 1;
-  }
-
-  .tree-row .tree-del:hover {
-    color: #e05656;
-  }
-
   /* 表页签子标签栏 */
   .subtabbar {
     display: flex;
@@ -5213,63 +4514,4 @@
   }
 
   /* ===== 底部状态栏 ===== */
-  footer {
-    display: flex;
-    gap: 6px;
-    padding: 4px 14px;
-    background: #1e2128;
-    border-top: 1px solid #2c303a;
-    color: #6b7484;
-    font-size: 11px;
-    align-items: center;
-  }
-
-  footer .spacer {
-    flex: 1;
-  }
-
-  /* 底部状态栏连接信息（绿色） */
-  .conn-info {
-    color: #3fbf6a;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .conn-ok {
-    color: #4cd67d;
-    font-weight: 600;
-  }
-
-  /* 底部连接/断开按钮 */
-  .footer-disconnect {
-    flex-shrink: 0;
-    margin-left: 10px;
-  }
-
-  /* 底部设置按钮（蓝色图标） */
-  .footer-settings {
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 5px;
-    border: none;
-    background: #2f6fed;
-    color: #fff;
-    cursor: pointer;
-    margin-right: 2px;
-    flex-shrink: 0;
-  }
-
-  .footer-settings:hover {
-    background: #4a83f5;
-  }
-
-  .footer-settings svg {
-    width: 12px;
-    height: 12px;
-  }
 </style>
