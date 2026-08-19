@@ -1792,7 +1792,21 @@
               onclick={() => (activeTabId = t.id)}
               onkeydown={(e) => e.key === 'Enter' && (activeTabId = t.id)}
             >
-              <span class="tab-ico">{t.kind === 'table' ? '📋' : '❯'}</span>
+              <span class="tab-ico">
+              {#if t.kind === 'table'}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <line x1="3" y1="9" x2="21" y2="9" />
+                  <line x1="3" y1="15" x2="21" y2="15" />
+                  <line x1="9" y1="3" x2="9" y2="21" />
+                  <line x1="15" y1="3" x2="15" y2="21" />
+                </svg>
+              {:else}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+              {/if}
+            </span>
               <span class="tab-title">{t.title}</span>
               <span
                 class="tab-close"
@@ -2110,7 +2124,7 @@
                     <tbody>
                       {#each activeTab.structure ?? [] as col}
                         <tr>
-                          <td>{col.is_pk ? '🔑 ' : ''}{col.name}</td>
+                          <td>{#if col.is_pk}<span class="pk-badge">PK</span>{/if}{col.name}</td>
                           <td>{col.type_name}</td>
                           <td>{col.is_nullable === 'YES' ? '是' : '否'}</td>
                           <td>{col.default ?? '—'}</td>
@@ -2157,7 +2171,41 @@
           </div>
         {/if}
       {:else}
-        <div class="empty">连接后点击「＋ 新建查询」开始</div>
+        <div class="welcome">
+          <div class="welcome-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <ellipse cx="12" cy="5" rx="8" ry="3" />
+              <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+              <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+            </svg>
+          </div>
+          <h2 class="welcome-title">欢迎使用 Tusk</h2>
+          <p class="welcome-sub">PostgreSQL · SQLite 数据库客户端</p>
+          <div class="welcome-steps">
+            <div class="welcome-step">
+              <span class="ws-num">1</span>
+              <div class="ws-body">
+                <b>新建连接</b>
+                <span>点击上方「连接」或侧栏 ＋ 添加数据库</span>
+              </div>
+            </div>
+            <div class="welcome-step">
+              <span class="ws-num">2</span>
+              <div class="ws-body">
+                <b>浏览数据</b>
+                <span>双击左侧连接/库/表，逐层展开直接查看</span>
+              </div>
+            </div>
+            <div class="welcome-step">
+              <span class="ws-num">3</span>
+              <div class="ws-body">
+                <b>运行 SQL</b>
+                <span>点击「＋ 新建查询」，Cmd/Ctrl + Enter 执行</span>
+              </div>
+            </div>
+          </div>
+          <button class="primary welcome-cta" onclick={() => (showConnPanel = true)}>新建连接</button>
+        </div>
       {/if}
     </section>
   </main>
@@ -2174,7 +2222,16 @@
         onkeydown={(e) => e.key === 'Escape' && (showDesigner = false)}
       >
         <div class="dialog-head">
-          <span class="dialog-title">📋 {editingTable ? `编辑表：${editingTable.table}` : '新建表'}</span>
+          <span class="dialog-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="title-ico">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <line x1="3" y1="9" x2="21" y2="9" />
+                <line x1="3" y1="15" x2="21" y2="15" />
+                <line x1="9" y1="3" x2="9" y2="21" />
+                <line x1="15" y1="3" x2="15" y2="21" />
+              </svg>
+              {editingTable ? `编辑表：${editingTable.table}` : '新建表'}
+            </span>
           <button class="dialog-close" onclick={() => (showDesigner = false)}>×</button>
         </div>
         <div class="dialog-body">
@@ -2524,7 +2581,14 @@
         onkeydown={(e) => e.key === 'Escape' && (showDbDialog = false)}
       >
         <div class="dialog-head">
-          <span class="dialog-title">🗄 新建数据库</span>
+          <span class="dialog-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="title-ico">
+                <ellipse cx="12" cy="5" rx="8" ry="3" />
+                <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+                <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+              </svg>
+              新建数据库
+            </span>
           <button class="dialog-close" onclick={() => (showDbDialog = false)}>×</button>
         </div>
         <div class="dialog-body">
@@ -2679,7 +2743,22 @@
                   onclick={() => openSearchResult(r)}
                   title={`打开 ${r.db}.${r.table}`}
                 >
-                  <span class="ico">{r.kind === 'view' ? '👁' : '📋'}</span>
+                  <span class="ico">
+                    {#if r.kind === 'view'}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                        <circle cx="12" cy="12" r="3" />
+                      </svg>
+                    {:else}
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="2" />
+                        <line x1="3" y1="9" x2="21" y2="9" />
+                        <line x1="3" y1="15" x2="21" y2="15" />
+                        <line x1="9" y1="3" x2="9" y2="21" />
+                        <line x1="15" y1="3" x2="15" y2="21" />
+                      </svg>
+                    {/if}
+                  </span>
                   <span class="s-db">{r.db}</span>
                   <span class="s-sep">.</span>
                   <span class="s-tbl">{r.table}</span>
@@ -2704,7 +2783,13 @@
         onkeydown={(e) => e.key === 'Escape' && (showViewDialog = false)}
       >
         <div class="dialog-head">
-          <span class="dialog-title">👁 新建视图</span>
+          <span class="dialog-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="title-ico">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+              新建视图
+            </span>
           <button class="dialog-close" onclick={() => (showViewDialog = false)}>×</button>
         </div>
         <div class="dialog-body">
@@ -2754,7 +2839,14 @@
       }}
     ></div>
     <div class="ctx-menu" style="left:{connMenu!.x}px; top:{connMenu!.y}px">
-      <div class="ctx-title">🔌 {connMenu!.name}</div>
+      <div class="ctx-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="ctx-ico">
+                <ellipse cx="12" cy="5" rx="8" ry="3" />
+                <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+                <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+              </svg>
+              {connMenu!.name}
+            </div>
       {#if connMenu!.connected}
         <button
           onclick={() => {
@@ -2808,7 +2900,14 @@
       }}
     ></div>
     <div class="ctx-menu" style="left:{dbMenu!.x}px; top:{dbMenu!.y}px">
-      <div class="ctx-title">🗄 {dbMenu!.db}</div>
+      <div class="ctx-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="ctx-ico">
+                <ellipse cx="12" cy="5" rx="8" ry="3" />
+                <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+                <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+              </svg>
+              {dbMenu!.db}
+            </div>
       <button onclick={() => createTableIn(dbMenu!.conn, dbMenu!.db)}>＋ 在此库新建表</button>
       <button onclick={() => createViewIn(dbMenu!.conn, dbMenu!.db)}>＋ 在此库新建视图</button>
       <button onclick={() => newQueryIn(dbMenu!.conn, dbMenu!.db)}>⌨ 打开查询编辑器</button>
@@ -4505,11 +4604,115 @@
     background: #20242c;
   }
 
+  .pk-badge {
+    display: inline-block;
+    background: #2f6fed22;
+    color: #4a83f5;
+    font-size: 9px;
+    font-weight: 700;
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-right: 6px;
+    vertical-align: 1px;
+    letter-spacing: 0.5px;
+  }
+
   .count {
     padding: 8px 14px;
     color: #6b7484;
     font-size: 11px;
     border-top: 1px solid #2c303a;
+  }
+
+  .welcome {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 40px;
+    user-select: none;
+  }
+
+  .welcome-icon {
+    width: 72px;
+    height: 72px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, #2f6fed22, #2f6fed08);
+    border: 1px solid #2f6fed33;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #4a83f5;
+    margin-bottom: 10px;
+  }
+
+  .welcome-icon svg {
+    width: 36px;
+    height: 36px;
+  }
+
+  .welcome-title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: #e8ebf0;
+  }
+
+  .welcome-sub {
+    margin: 0 0 18px;
+    font-size: 12px;
+    color: #6b7484;
+  }
+
+  .welcome-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 22px;
+  }
+
+  .welcome-step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 320px;
+  }
+
+  .ws-num {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: #2f6fed;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .ws-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .ws-body b {
+    font-size: 13px;
+    color: #d7dae0;
+    font-weight: 600;
+  }
+
+  .ws-body span {
+    font-size: 12px;
+    color: #6b7484;
+  }
+
+  .welcome-cta {
+    min-width: 120px;
   }
 
   .empty {
@@ -4519,4 +4722,42 @@
   }
 
   /* ===== 底部状态栏 ===== */
+
+  .tab-ico {
+    display: inline-flex;
+    align-items: center;
+    color: #8b93a3;
+  }
+
+  .tab-ico svg {
+    width: 13px;
+    height: 13px;
+  }
+
+  .dialog-title .title-ico {
+    width: 15px;
+    height: 15px;
+    vertical-align: -2px;
+    margin-right: 4px;
+    color: #4a83f5;
+  }
+
+  .ctx-title .ctx-ico {
+    width: 13px;
+    height: 13px;
+    vertical-align: -2px;
+    margin-right: 6px;
+    color: #4a83f5;
+  }
+
+  .search-item .ico {
+    display: inline-flex;
+    align-items: center;
+    color: #6b7484;
+  }
+
+  .search-item .ico svg {
+    width: 13px;
+    height: 13px;
+  }
 </style>

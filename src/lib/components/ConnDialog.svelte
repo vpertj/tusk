@@ -35,7 +35,14 @@
           onkeydown={(e) => e.key === 'Escape' && close()}
         >
           <div class="dialog-head">
-            <span class="dialog-title">🔌 连接数据库</span>
+            <span class="dialog-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="title-ico">
+                <ellipse cx="12" cy="5" rx="8" ry="3" />
+                <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+                <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+              </svg>
+              连接数据库
+            </span>
             <button class="dialog-close" onclick={close}>×</button>
           </div>
           <div class="dialog-body">
@@ -48,7 +55,13 @@
                     onclick={() => connectSaved(sc.name)}
                     disabled={connecting}
                   >
-                    <span class="conn-ico">🔌</span>
+                    <span class="conn-ico">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <ellipse cx="12" cy="5" rx="8" ry="3" />
+                      <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+                      <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+                    </svg>
+                  </span>
                     <span class="conn-main">
                       <span class="conn-name">{sc.name}</span>
                       <span class="conn-sub">
@@ -331,6 +344,26 @@
     cursor: not-allowed;
   }
 
+
+  .dialog-title .title-ico {
+    width: 15px;
+    height: 15px;
+    vertical-align: -2px;
+    margin-right: 4px;
+    color: #4a83f5;
+  }
+
+  .conn-ico {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #4a83f5;
+  }
+
+  .conn-ico svg {
+    width: 16px;
+    height: 16px;
+  }
   .conn-ico {
     font-size: 16px;
   }

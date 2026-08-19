@@ -59,7 +59,7 @@
                 onkeydown={(e) => e.key === 'Enter' && connRowClick(c)}
               >
                 <span class="arrow">{c.connected && c.expanded ? '▾' : '▸'}</span>
-                <span class="ico conn-dot" class:ok={c.connected}>{c.connected ? '●' : '○'}</span>
+                <span class="ico conn-dot" class:ok={c.connected}></span>
                 <span class="label">{c.name}</span>
                 {#if c.connected}<span class="conn-host">{c.host}:{c.port}</span>{/if}
                 {#if c.connected && c.id === connId}
@@ -93,7 +93,13 @@
                         onkeydown={(e) => e.key === 'Enter' && toggleDb(c.id, db.name)}
                       >
                         <span class="arrow">{treeOpen[ck(c.id, db.name)] ? '▾' : '▸'}</span>
-                        <span class="ico">🗄</span>
+                        <span class="ico tree-db-ico">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <ellipse cx="12" cy="5" rx="8" ry="3" />
+                            <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+                            <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+                          </svg>
+                        </span>
                         <span class="label">{db.name}</span>
                         {#if loadingKey === ck(c.id, db.name)}<span class="spin">…</span>{/if}
                       </div>
@@ -124,7 +130,22 @@
                                   }}
                                   >{treeOpen[ck(c.id, `${db.name}.${tb.name}`)] ? '▾' : '▸'}</span
                                 >
-                                <span class="ico">{tb.kind === 'view' ? '👁' : '📋'}</span>
+                                <span class="ico tree-tbl-ico">
+                                {#if tb.kind === 'view'}
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                                    <circle cx="12" cy="12" r="3" />
+                                  </svg>
+                                {:else}
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                                    <line x1="3" y1="9" x2="21" y2="9" />
+                                    <line x1="3" y1="15" x2="21" y2="15" />
+                                    <line x1="9" y1="3" x2="9" y2="21" />
+                                    <line x1="15" y1="3" x2="15" y2="21" />
+                                  </svg>
+                                {/if}
+                              </span>
                                 <span class="label">{tb.name}</span>
                                 {#if loadingKey === ck(c.id, `${db.name}.${tb.name}`)}<span class="spin">…</span>{/if}
                                 {#if tb.kind === 'table'}
@@ -158,7 +179,19 @@
                                 <div class="tree-children">
                                   {#each columns[ck(c.id, `${db.name}.${tb.name}`)] as col}
                                     <div class="tree-row leaf">
-                                      <span class="ico">{col.is_pk ? '🔑' : '▫'}</span>
+                                      <span class="ico tree-col-ico">
+                                {#if col.is_pk}
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="7.5" cy="15.5" r="4.5" />
+                                    <path d="M10.7 12.3 21 2" />
+                                    <line x1="17" y1="6" x2="20" y2="9" />
+                                  </svg>
+                                {:else}
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                                    <circle cx="12" cy="12" r="2" />
+                                  </svg>
+                                {/if}
+                              </span>
                                       <span class="label">{col.name}</span>
                                       <span class="type">{col.type_name}</span>
                                     </div>
@@ -305,6 +338,32 @@
     background: #1d2a44;
   }
 
+
+  .tree-row .ico svg {
+    width: 13px;
+    height: 13px;
+    flex-shrink: 0;
+  }
+
+  .tree-row .ico {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .conn-dot::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #4c5462;
+    display: inline-block;
+  }
+
+  .conn-dot.ok::before {
+    background: #4cd67d;
+    box-shadow: 0 0 4px rgba(76, 214, 125, 0.5);
+  }
   .conn-dot {
     font-size: 9px;
     color: #5a6270;
