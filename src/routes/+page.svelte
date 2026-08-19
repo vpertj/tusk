@@ -962,7 +962,7 @@
   }
 
   // ===== 检查更新（GitHub Releases + 自动下载安装） =====
-  const APP_VERSION = '1.2.0';
+  const APP_VERSION = '1.3.0';
   let updateInfo = $state<{
     version: string;
     notes: string;
