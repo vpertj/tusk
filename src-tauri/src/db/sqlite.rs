@@ -344,7 +344,7 @@ pub async fn import_csv(entry: &ConnEntry, _dbname: &str, table: &str, path: &st
         .iter()
         .map(|&i| format!("\"{}\"", headers[i].replace('"', "\"\"")))
         .collect();
-    let placeholders = vec!["?1".to_string(); matched.len()].join(", ");
+    let placeholders = (1..=matched.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
     let insert_sql = format!("INSERT INTO \"{t}\" ({}) VALUES ({placeholders})", qcols.join(", "));
     let tx = conn.unchecked_transaction().map_err(|e| format!("事务失败: {e}"))?;
     let mut count: u64 = 0;
@@ -352,11 +352,14 @@ pub async fn import_csv(entry: &ConnEntry, _dbname: &str, table: &str, path: &st
         let mut stmt = tx.prepare(&insert_sql).map_err(|e| format!("SQL 错误: {e}"))?;
         for rec in rdr.records() {
             let rec = rec.map_err(|e| format!("解析第 {} 行失败: {e}", count + 2))?;
-            let vals: Vec<String> = matched
+            let vals: Vec<Option<&str>> = matched
                 .iter()
-                .map(|&i| rec.get(i).unwrap_or("").to_string())
+                .map(|&i| {
+                    let v = rec.get(i).unwrap_or("");
+                    if v.is_empty() { None } else { Some(v) }
+                })
                 .collect();
-            let params: Vec<&str> = vals.iter().map(|s| s.as_str()).collect();
+            let params: Vec<Option<&str>> = vals;
             stmt.execute(rusqlite::params_from_iter(params.iter().copied()))
                 .map_err(|e| format!("插入第 {} 行失败: {e}", count + 2))?;
             count += 1;
@@ -454,6 +457,28 @@ mod tests {
             assert!(csv.contains("name"), "CSV 应含表头");
             assert!(csv.contains("orange"), "CSV 应含更新后的数据");
             let _ = std::fs::remove_file(&path);
+
+            // 10. 导入 CSV（表头乱序 + 引号转义 + 空值 → NULL）
+            let csv_path = "/tmp/tusk_sqlite_import.csv";
+            std::fs::write(
+                csv_path,
+                "price,name\n3.14,\"pie, big\"\n,empty\n",
+            )
+            .expect("写 CSV 失败");
+            let n = import_csv(&entry, "main", "t1", csv_path).await.expect("导入失败");
+            assert_eq!(n, 2, "应导入 2 行");
+            let r = query(&entry, "SELECT name, price FROM t1 WHERE rowid > 4 ORDER BY rowid").await.expect("查询失败");
+            assert_eq!(r.rows.len(), 2);
+            assert_eq!(r.rows[0][0], serde_json::Value::String("pie, big".into()), "引号逗号应正确解析");
+            assert_eq!(r.rows[0][1], serde_json::Value::from(3.14f64));
+            assert_eq!(r.rows[1][1], serde_json::Value::Null, "空字段应导入为 NULL");
+            // 无匹配表头报错
+            let csv2 = "/tmp/tusk_sqlite_import_nomatch.csv";
+            std::fs::write(csv2, "foo,bar\n1,2\n").expect("写 CSV 失败");
+            let err = import_csv(&entry, "main", "t1", csv2).await.expect_err("无匹配列应报错");
+            assert!(err.contains("无匹配"), "报错应提示列不匹配: {err}");
+            let _ = std::fs::remove_file(csv_path);
+            let _ = std::fs::remove_file(csv2);
         });
 
         // 清理
