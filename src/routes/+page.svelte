@@ -1576,35 +1576,34 @@
     }
   }
 
-  let importFileInput: HTMLInputElement = $state() as HTMLInputElement;
   let importTarget: QueryTab | null = null;
 
-  function importTable(raw: QueryTab) {
-    importTarget = resolveTab(raw);
-    importFileInput?.click();
-  }
-
-  async function onImportFileSelected(e: Event) {
-    const input = e.target as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file || !importTarget) return;
-    const t = importTarget;
-    importTarget = null;
-    t.loading = true;
+  async function importTable(raw: QueryTab) {
+    const t = resolveTab(raw);
+    importTarget = t;
     try {
-      const n = await invoke<number>('import_csv', {
-        connId: t.connId,
-        dbname: t.dbname,
-        table: t.table,
-        path: (file as unknown as { path: string }).path,
-      });
-      t.exportMsg = `已导入 ${n} 行`;
-      await loadTablePage(t);
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const picked = await open({ multiple: false, filters: [{ name: 'CSV', extensions: ['csv'] }] });
+      if (typeof picked !== 'string' || !picked) return;
+      t.loading = true;
+      try {
+        const n = await invoke<number>('import_csv', {
+          connId: t.connId,
+          dbname: t.dbname,
+          table: t.table,
+          path: picked,
+        });
+        t.exportMsg = `已导入 ${n} 行`;
+        await loadTablePage(t);
+      } catch (e) {
+        t.error = String(e);
+      } finally {
+        t.loading = false;
+      }
     } catch (e) {
       t.error = String(e);
     } finally {
-      t.loading = false;
+      importTarget = null;
     }
   }
 
@@ -1624,12 +1623,20 @@
   // ================= SQL 历史（localStorage，最近 50 条） =================
   let sqlHistory = $state<string[]>([]);
   let histIdx = $state(-1);
+  let showHistory = $state(false);
 
   try {
     const raw = localStorage.getItem('tusk.sqlHistory');
     if (raw) sqlHistory = JSON.parse(raw);
   } catch {
     sqlHistory = [];
+  }
+
+  function clearHistory() {
+    sqlHistory = [];
+    histIdx = -1;
+    showHistory = false;
+    localStorage.removeItem('tusk.sqlHistory');
   }
 
   function saveHistory(sqlText: string) {
@@ -1878,6 +1885,34 @@
                   title="EXPLAIN (ANALYZE, BUFFERS)，仅支持单条 SELECT"
                   >🧠 Explain</button
                 >
+                <div class="hist-wrap">
+                  <button onclick={() => (showHistory = !showHistory)} disabled={sqlHistory.length === 0} title="查询历史（最近 50 条）">
+                    🕘 历史
+                  </button>
+                  {#if showHistory && sqlHistory.length > 0}
+                    <div class="hist-panel">
+                      <div class="hist-head">
+                        <span>最近执行（↑/↓ 可快速切换）</span>
+                        <button class="hist-clear" onclick={clearHistory}>清空</button>
+                      </div>
+                      <div class="hist-list">
+                        {#each sqlHistory as h, i (h)}
+                          <button
+                            class="hist-item"
+                            onclick={() => {
+                              if (activeTab) activeTab.sql = h;
+                              showHistory = false;
+                            }}
+                            title={h}
+                          >
+                            <span class="hist-num">{i + 1}</span>
+                            <span class="hist-sql">{h}</span>
+                          </button>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
+                </div>
                 <span class="hint">Cmd+Enter 执行 · Cmd+N 新查询</span>
               </div>
             </div>
@@ -2060,13 +2095,6 @@
                   {canEdit(activeTab) ? '双击单元格编辑 · 点击行选中' : '无主键表仅可新增/导出'}
                 </span>
               </div>
-              <input
-                type="file"
-                accept=".csv"
-                bind:this={importFileInput}
-                onchange={onImportFileSelected}
-                style="display: none"
-              />
               <div class="result">
                 {#if activeTab.exportMsg}
                   <div class="ok">✓ {activeTab.exportMsg}</div>
@@ -4657,6 +4685,87 @@
     margin-right: 6px;
     vertical-align: 1px;
     letter-spacing: 0.5px;
+  }
+
+  .hist-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .hist-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 60;
+    width: 420px;
+    max-width: 70vw;
+    background: #1a1e26;
+    border: 1px solid #2c303a;
+    border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+  }
+
+  .hist-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: #6b7484;
+    border-bottom: 1px solid #2c303a;
+  }
+
+  .hist-clear {
+    background: none;
+    border: none;
+    color: #e05656;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .hist-clear:hover {
+    background: #e0565618;
+  }
+
+  .hist-list {
+    max-height: 260px;
+    overflow-y: auto;
+  }
+
+  .hist-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 12px;
+    background: none;
+    border: none;
+    border-bottom: 1px solid #232731;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .hist-item:hover {
+    background: #20242c;
+  }
+
+  .hist-num {
+    font-size: 10px;
+    color: #4a83f5;
+    min-width: 16px;
+  }
+
+  .hist-sql {
+    font-family: 'SF Mono', ui-monospace, monospace;
+    font-size: 12px;
+    color: #c8cdd6;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
   }
 
   .count {

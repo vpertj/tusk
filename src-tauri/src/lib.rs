@@ -56,6 +56,7 @@ pub fn run() {
             drop_database,
             import_csv
         ])
+        .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
