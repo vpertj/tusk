@@ -31,11 +31,20 @@ pub struct ConnectionInfo {
 /// 连接配置（与 UI 表单字段一一对应）
 #[derive(Debug, Clone)]
 pub struct ConnConfig {
+    pub db_type: String, // "postgres" | "sqlite"
     pub host: String,
     pub port: u16,
     pub user: String,
     pub password: String,
     pub dbname: String,
+    /// SQLite 文件路径（db_type == "sqlite" 时使用）
+    pub path: String,
+}
+
+impl ConnConfig {
+    pub fn is_sqlite(&self) -> bool {
+        self.db_type == "sqlite"
+    }
 }
 
 
@@ -95,6 +104,9 @@ pub struct SavedConn {
     pub port: u16,
     pub user: String,
     pub dbname: String,
+    /// SQLite 文件路径（db_type == "sqlite" 时使用）
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 

@@ -91,19 +91,26 @@ async fn run_query(client: &Client, sql: &str) -> Result<QueryResult, String> {
 #[tauri::command]
 pub async fn connect(
     state: State<'_, AppState>,
+    db_type: String,
     host: String,
     port: u16,
     user: String,
     password: String,
     dbname: String,
+    path: String,
 ) -> Result<ConnectionInfo, String> {
     let cfg = ConnConfig {
+        db_type,
         host,
         port,
         user,
         password,
         dbname,
+        path,
     };
+    if cfg.is_sqlite() {
+        return crate::db::sqlite::connect(state, cfg).await;
+    }
     let (client, version) = open_connection(&cfg).await?;
     // 查实际登录用户（空 user 时 PG 默认当前系统用户）
     let u = client
@@ -122,8 +129,9 @@ pub async fn connect(
     state.conns.lock().await.insert(
         id.clone(),
         ConnEntry {
-            client,
+            client: Some(client),
             cfg: cfg.clone(),
+            sqlite: None,
         },
     );
     Ok(ConnectionInfo {
@@ -295,7 +303,11 @@ pub async fn query(
         let conns = state.conns.lock().await;
         conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
-    run_query_multi(&entry.client, &sql).await
+    if entry.cfg.is_sqlite() {
+        let r = crate::db::sqlite::query(&entry, &sql).await?;
+        return Ok(MultiResult { results: vec![r] });
+    }
+    run_query_multi(entry.pg_client()?.as_ref(), &sql).await
 }
 
 
@@ -306,7 +318,10 @@ pub async fn list_databases(state: State<'_, AppState>, conn_id: String) -> Resu
         let conns = state.conns.lock().await;
         conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
-    list_databases_core(&entry.client).await
+    if entry.cfg.is_sqlite() {
+        return crate::db::sqlite::list_databases(&entry).await;
+    }
+    list_databases_core(entry.pg_client()?.as_ref()).await
 }
 
 
@@ -317,10 +332,14 @@ pub async fn list_tables(
     conn_id: String,
     dbname: String,
 ) -> Result<Vec<TableInfo>, String> {
-    let cfg = {
+    let entry = {
         let conns = state.conns.lock().await;
-        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
+    if entry.cfg.is_sqlite() {
+        return crate::db::sqlite::list_tables(&entry, &dbname).await;
+    }
+    let cfg = entry.cfg.clone();
     list_tables_core(&cfg, &dbname).await
 }
 
@@ -333,10 +352,14 @@ pub async fn list_columns(
     dbname: String,
     table: String,
 ) -> Result<Vec<SchemaColumn>, String> {
-    let cfg = {
+    let entry = {
         let conns = state.conns.lock().await;
-        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
+    if entry.cfg.is_sqlite() {
+        return crate::db::sqlite::list_columns(&entry, &dbname, &table).await;
+    }
+    let cfg = entry.cfg.clone();
     list_columns_core(&cfg, &dbname, &table).await
 }
 
@@ -725,10 +748,15 @@ pub async fn paginate_table(
     offset: u32,
     filters: Vec<FilterCond>,
 ) -> Result<TablePage, String> {
-    let cfg = {
+    let entry = {
         let conns = state.conns.lock().await;
-        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
+    if entry.cfg.is_sqlite() {
+        let page = if offset > 0 { offset / limit } else { 0 } as u64;
+        return crate::db::sqlite::paginate_table(&entry, &dbname, &table, page, limit as u64, filters.first().cloned()).await;
+    }
+    let cfg = entry.cfg.clone();
     let res = paginate_table_core(&cfg, &dbname, &table, limit, offset, filters).await;
     match &res {
         Ok(p) => eprintln!(
@@ -869,11 +897,13 @@ async fn connect_saved_core(name: &str) -> Result<(ConnConfig, String), String> 
     let password = keychain_get(name)?.unwrap_or_default();
     Ok((
         ConnConfig {
+            db_type: conn.db_type.clone(),
             host: conn.host.clone(),
             port: conn.port,
             user: conn.user.clone(),
             password: password.clone(),
             dbname: conn.dbname.clone(),
+            path: conn.path.clone().unwrap_or_default(),
         },
         password,
     ))
@@ -890,6 +920,7 @@ pub async fn save_connection(
     user: String,
     password: String,
     dbname: String,
+    path: String,
 ) -> Result<(), String> {
     let conn = SavedConn {
         db_type,
@@ -898,6 +929,11 @@ pub async fn save_connection(
         port,
         user,
         dbname,
+        path: if path.trim().is_empty() {
+            None
+        } else {
+            Some(path)
+        },
     };
     let pw = if password.trim().is_empty() {
         None
@@ -926,6 +962,9 @@ pub async fn delete_connection(name: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn connect_saved(state: State<'_, AppState>, name: String) -> Result<ConnectionInfo, String> {
     let (cfg, _pw) = connect_saved_core(&name).await?;
+    if cfg.is_sqlite() {
+        return crate::db::sqlite::connect(state, cfg).await;
+    }
     let (client, version) = open_connection(&cfg).await?;
     // 查实际登录用户
     let u = client
@@ -943,8 +982,9 @@ pub async fn connect_saved(state: State<'_, AppState>, name: String) -> Result<C
     state.conns.lock().await.insert(
         id.clone(),
         ConnEntry {
-            client,
+            client: Some(client),
             cfg: cfg.clone(),
+            sqlite: None,
         },
     );
     Ok(ConnectionInfo {
@@ -1146,10 +1186,16 @@ pub async fn update_cell(
     col_type: String,
     value: Option<String>,
 ) -> Result<u64, String> {
-    let cfg = {
+    let entry = {
         let conns = state.conns.lock().await;
-        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
+    if entry.cfg.is_sqlite() {
+        let rowid: i64 = pk_vals.first().and_then(|v| v.parse().ok()).ok_or("缺少 rowid")?;
+        crate::db::sqlite::update_cell(&entry, &dbname, &table, rowid, &col, value).await?;
+        return Ok(1);
+    }
+    let cfg = entry.cfg.clone();
     let res = update_cell_core(&cfg, &dbname, &table, pk_cols.clone(), pk_vals.clone(), col.clone(), col_type.clone(), value.clone()).await;
     match &res {
         Ok(n) => eprintln!("[tusk] update_cell {dbname}.{table} SET {col} pk={pk_cols:?}{pk_vals:?} value={value:?} -> {n} 行"),
@@ -1169,10 +1215,16 @@ pub async fn delete_row(
     pk_cols: Vec<String>,
     pk_vals: Vec<String>,
 ) -> Result<u64, String> {
-    let cfg = {
+    let entry = {
         let conns = state.conns.lock().await;
-        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
+    if entry.cfg.is_sqlite() {
+        let rowid: i64 = pk_vals.first().and_then(|v| v.parse().ok()).ok_or("缺少 rowid")?;
+        crate::db::sqlite::delete_row(&entry, &dbname, &table, rowid).await?;
+        return Ok(1);
+    }
+    let cfg = entry.cfg.clone();
     let res = delete_row_core(&cfg, &dbname, &table, pk_cols.clone(), pk_vals.clone()).await;
     match &res {
         Ok(n) => eprintln!("[tusk] delete_row {dbname}.{table} pk={pk_cols:?}{pk_vals:?} -> {n} 行"),
@@ -1190,10 +1242,14 @@ pub async fn insert_row(
     dbname: String,
     table: String,
 ) -> Result<i32, String> {
-    let cfg = {
+    let entry = {
         let conns = state.conns.lock().await;
-        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
+    if entry.cfg.is_sqlite() {
+        return crate::db::sqlite::insert_row(&entry, &dbname, &table).await;
+    }
+    let cfg = entry.cfg.clone();
     insert_row_core(&cfg, &dbname, &table).await
 }
 
@@ -1206,10 +1262,14 @@ pub async fn export_csv(
     dbname: String,
     table: String,
 ) -> Result<String, String> {
-    let cfg = {
+    let entry = {
         let conns = state.conns.lock().await;
-        conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
+    if entry.cfg.is_sqlite() {
+        return crate::db::sqlite::export_csv(&entry, &dbname, &table).await;
+    }
+    let cfg = entry.cfg.clone();
     export_csv_core(&cfg, &dbname, &table).await
 }
 
@@ -1266,7 +1326,7 @@ pub async fn explain_query(
         let conns = state.conns.lock().await;
         conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
     };
-    explain_query_core(&entry.client, &sql).await
+    explain_query_core(entry.pg_client()?.as_ref(), &sql).await
 }
 
 
@@ -2513,7 +2573,7 @@ async fn write_text_file_core(path: &str, content: &str) -> Result<(), String> {
 }
 
 
-fn now_str() -> String {
+pub fn now_str() -> String {
     // 简单本地时间戳（无 chrono 依赖）
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2613,11 +2673,13 @@ mod tests {
 
     fn test_cfg() -> ConnConfig {
         ConnConfig {
+            db_type: "postgres".into(),
             host: "localhost".into(),
             port: 5432,
             user: whoami().into(),
             password: String::new(),
             dbname: "tusk_demo".into(),
+            path: String::new(),
         }
     }
 
@@ -2841,6 +2903,7 @@ mod tests {
             port: 5432,
             user: whoami().into(),
             dbname: "tusk_demo".into(),
+            path: None,
         };
 
         // 保存 → 列表
@@ -3960,13 +4023,13 @@ mod tests {
         admin.execute(&format!("CREATE DATABASE \"{src}\""), &[]).await.unwrap();
         admin.execute(&format!("CREATE DATABASE \"{dst}\""), &[]).await.unwrap();
         // 源库建表 + 插数据
-        let (src_c, _) = open_connection(&ConnConfig { host: cfg.host.clone(), port: cfg.port, user: cfg.user.clone(), password: cfg.password.clone(), dbname: src.clone() }).await.unwrap();
+        let (src_c, _) = open_connection(&ConnConfig { db_type: "postgres".into(), host: cfg.host.clone(), port: cfg.port, user: cfg.user.clone(), password: cfg.password.clone(), dbname: src.clone(), path: String::new() }).await.unwrap();
         src_c.execute("CREATE TABLE t1 (id serial primary key, name text, price numeric(10,2))", &[]).await.unwrap();
         src_c.execute("INSERT INTO t1 (name, price) VALUES ('a', 1.5), ('b', 2.75), ('c', NULL)", &[]).await.unwrap();
         src_c.execute("CREATE TABLE t2 (id int primary key, note text)", &[]).await.unwrap();
         src_c.execute("INSERT INTO t2 VALUES (1, 'x'), (2, 'y')", &[]).await.unwrap();
         // 目标库建同结构空表
-        let (dst_c, _) = open_connection(&ConnConfig { host: cfg.host.clone(), port: cfg.port, user: cfg.user.clone(), password: cfg.password.clone(), dbname: dst.clone() }).await.unwrap();
+        let (dst_c, _) = open_connection(&ConnConfig { db_type: "postgres".into(), host: cfg.host.clone(), port: cfg.port, user: cfg.user.clone(), password: cfg.password.clone(), dbname: dst.clone(), path: String::new() }).await.unwrap();
         dst_c.execute("CREATE TABLE t1 (id serial primary key, name text, price numeric(10,2))", &[]).await.unwrap();
         dst_c.execute("CREATE TABLE t2 (id int primary key, note text)", &[]).await.unwrap();
         // 同步数据

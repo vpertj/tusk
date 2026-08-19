@@ -4,6 +4,7 @@
     savedConns,
     connecting,
     dbType,
+    sqlitePath,
     host,
     port,
     user,
@@ -51,7 +52,7 @@
                     <span class="conn-main">
                       <span class="conn-name">{sc.name}</span>
                       <span class="conn-sub">
-                        <span class="badge">{sc.db_type === 'mysql' ? 'MySQL' : 'PG'}</span>
+                        <span class="badge">{sc.db_type === 'mysql' ? 'MySQL' : sc.db_type === 'sqlite' ? 'SQLite' : 'PG'}</span>
                         {sc.user}@{sc.host}:{sc.port} · {sc.dbname}
                       </span>
                     </span>
@@ -72,29 +73,37 @@
                 <label for="f-dbtype">数据库类型</label>
                 <select id="f-dbtype" bind:value={dbType}>
                   <option value="postgres">PostgreSQL 🐘</option>
+                  <option value="sqlite">SQLite 📄</option>
                   <option value="mysql" disabled>MySQL（即将支持）</option>
                 </select>
               </div>
-              <div class="field">
-                <label for="f-host">连接地址</label>
-                <input id="f-host" bind:value={host} placeholder="localhost" />
-              </div>
-              <div class="field">
-                <label for="f-port">端口</label>
-                <input id="f-port" bind:value={port} type="number" placeholder="5432" />
-              </div>
-              <div class="field">
-                <label for="f-user">用户名</label>
-                <input id="f-user" bind:value={user} placeholder="postgres" />
-              </div>
-              <div class="field">
-                <label for="f-pass">密码</label>
-                <input id="f-pass" bind:value={password} type="password" placeholder="留空表示免密" />
-              </div>
-              <div class="field">
-                <label for="f-db">数据库名</label>
-                <input id="f-db" bind:value={dbname} placeholder="postgres" />
-              </div>
+              {#if dbType === 'postgres'}
+                <div class="field">
+                  <label for="f-host">连接地址</label>
+                  <input id="f-host" bind:value={host} placeholder="localhost" />
+                </div>
+                <div class="field">
+                  <label for="f-port">端口</label>
+                  <input id="f-port" bind:value={port} type="number" placeholder="5432" />
+                </div>
+                <div class="field">
+                  <label for="f-user">用户名</label>
+                  <input id="f-user" bind:value={user} placeholder="postgres" />
+                </div>
+                <div class="field">
+                  <label for="f-pass">密码</label>
+                  <input id="f-pass" bind:value={password} type="password" placeholder="留空表示免密" />
+                </div>
+                <div class="field">
+                  <label for="f-db">数据库名</label>
+                  <input id="f-db" bind:value={dbname} placeholder="postgres" />
+                </div>
+              {:else if dbType === 'sqlite'}
+                <div class="field">
+                  <label for="f-path">数据库文件</label>
+                  <input id="f-path" bind:value={sqlitePath} placeholder="/path/to/your.db（不存在则自动创建）" />
+                </div>
+              {/if}
               <div class="field">
                 <label for="f-cname">连接名</label>
                 <input id="f-cname" bind:value={connName} placeholder="保存后一键连接（可选）" />

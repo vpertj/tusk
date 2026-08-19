@@ -42,6 +42,7 @@
   let password = $state('');
   let dbname = $state('postgres');
   let dbType = $state('postgres');
+  let sqlitePath = $state('');
   let showConnPanel = $state(true);
   let connName = $state('');
   let saveConn = $state(true);
@@ -1194,16 +1195,18 @@
         host: string;
         port: number;
       }>('connect', {
+        dbType,
         host,
         port,
         user,
         password,
         dbname,
+        path: sqlitePath,
       });
       connId = info.id;
       version = info.version;
       connMeta = { user: info.user, host: info.host, port: info.port, version: info.version };
-      status = `已连接 · ${user}@${host}:${port}`;
+      status = `已连接 · ${dbType === 'sqlite' ? info.host : `${user}@${host}:${port}`}`;
       showConnPanel = false;
       ensureTab();
       await loadDbs();
@@ -1219,6 +1222,7 @@
             user,
             password,
             dbname,
+            path: sqlitePath,
           });
           await loadSavedConns();
         } catch {
@@ -1730,6 +1734,7 @@
       {savedConns}
       {connecting}
       {dbType}
+      {sqlitePath}
       {host}
       {port}
       {user}

@@ -12,7 +12,11 @@
     {#if connId}
       <span class="conn-info">
         <span class="conn-ok">已连接</span>
-        · {connMeta.user}@{connMeta.host}:{connMeta.port} {connMeta.version.replace(/ on .*$/, '')}
+        {#if connMeta.port}
+          · {connMeta.user}@{connMeta.host}:{connMeta.port} {connMeta.version.replace(/ on .*$/, '')}
+        {:else}
+          · {connMeta.host} {connMeta.version.replace(/ on .*$/, '')}
+        {/if}
       </span>
     {:else}
       <span>未连接</span>
