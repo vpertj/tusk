@@ -32,7 +32,7 @@ lib.rs(4185 行)→ 薄壳(57 行)+ models.rs + state.rs + db/pg.rs。
 
 ---
 
-# P1 功能路线(执行中)
+# P1 功能路线(全部完成)
 
 ## ✅ P1-1 数据导入 CSV(已完成, commit 55f39ac)
 - PG:COPY 流式(表头列匹配/引号转义/空值→NULL/事务),SQLite 逐行 INSERT 事务
@@ -42,8 +42,10 @@ lib.rs(4185 行)→ 薄壳(57 行)+ models.rs + state.rs + db/pg.rs。
 ## ✅ P1-2 查询历史可视化(已完成, commit 1375f82)
 - 存储逻辑原有(50 条去重 localStorage + ↑↓ 切换),补「🕘 历史」下拉面板(点击回填/清空)
 
-## ⏳ P1-3 SSH 隧道(待做,独立一轮)
-- russh 依赖,连接配置加 SSH 选项(host/port/user/key/pass),本地端口转发
+## ✅ P1-3 SSH 隧道(已完成, commit 99eeaad)
+- russh 0.62:连接表单「通过 SSH 隧道连接」(host/port/user/pass,留空私钥自动探测 ~/.ssh)
+- 本地随机端口转发 + watch 信号保活(断开连接即关隧道);connect/save_connection 全链路
+- TDD:本地 russh server → 隧道 → 真实 PG 查询 + 隧道关闭断连 + 错误密码认证失败
 
 ## ✅ P1-4 多结果集(原已实现,无需开发)
 - MultiResult → 前端逐结果渲染 + 序号计数
