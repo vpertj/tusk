@@ -53,7 +53,8 @@ pub fn run() {
             install_update,
             get_download_dir,
             create_database,
-            drop_database
+            drop_database,
+            import_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

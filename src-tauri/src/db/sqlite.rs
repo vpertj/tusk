@@ -311,6 +311,61 @@ pub async fn export_csv(entry: &ConnEntry, _dbname: &str, table: &str) -> Result
     Ok(path)
 }
 
+/// 导入 CSV（表头匹配列，逐行 INSERT）
+pub async fn import_csv(entry: &ConnEntry, _dbname: &str, table: &str, path: &str) -> Result<u64, String> {
+    let conn = conn_of(entry)?.lock().await;
+    let mut rdr = csv::Reader::from_path(path).map_err(|e| format!("读取 CSV 失败: {e}"))?;
+    let headers: Vec<String> = rdr
+        .headers()
+        .map_err(|e| format!("解析表头失败: {e}"))?
+        .iter()
+        .map(|h| h.trim().to_string())
+        .collect();
+    // 目标列
+    let mut col_stmt = conn
+        .prepare(&format!("PRAGMA table_info(\"{}\")", table.replace('"', "\"\"")))
+        .map_err(|e| format!("SQL 错误: {e}"))?;
+    let cols = col_stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| format!("查询失败: {e}"))?;
+    let target_cols: Vec<String> = cols.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    // 匹配
+    let mut matched: Vec<usize> = Vec::new();
+    for (i, h) in headers.iter().enumerate() {
+        if target_cols.iter().any(|c| c.eq_ignore_ascii_case(h)) {
+            matched.push(i);
+        }
+    }
+    if matched.is_empty() {
+        return Err(format!("CSV 表头与目标表列无匹配（目标列: {}）", target_cols.join(", ")));
+    }
+    let t = table.replace('"', "\"\"");
+    let qcols: Vec<String> = matched
+        .iter()
+        .map(|&i| format!("\"{}\"", headers[i].replace('"', "\"\"")))
+        .collect();
+    let placeholders = vec!["?1".to_string(); matched.len()].join(", ");
+    let insert_sql = format!("INSERT INTO \"{t}\" ({}) VALUES ({placeholders})", qcols.join(", "));
+    let tx = conn.unchecked_transaction().map_err(|e| format!("事务失败: {e}"))?;
+    let mut count: u64 = 0;
+    {
+        let mut stmt = tx.prepare(&insert_sql).map_err(|e| format!("SQL 错误: {e}"))?;
+        for rec in rdr.records() {
+            let rec = rec.map_err(|e| format!("解析第 {} 行失败: {e}", count + 2))?;
+            let vals: Vec<String> = matched
+                .iter()
+                .map(|&i| rec.get(i).unwrap_or("").to_string())
+                .collect();
+            let params: Vec<&str> = vals.iter().map(|s| s.as_str()).collect();
+            stmt.execute(rusqlite::params_from_iter(params.iter().copied()))
+                .map_err(|e| format!("插入第 {} 行失败: {e}", count + 2))?;
+            count += 1;
+        }
+    }
+    tx.commit().map_err(|e| format!("提交失败: {e}"))?;
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

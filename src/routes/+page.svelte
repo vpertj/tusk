@@ -1576,6 +1576,38 @@
     }
   }
 
+  let importFileInput: HTMLInputElement = $state() as HTMLInputElement;
+  let importTarget: QueryTab | null = null;
+
+  function importTable(raw: QueryTab) {
+    importTarget = resolveTab(raw);
+    importFileInput?.click();
+  }
+
+  async function onImportFileSelected(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file || !importTarget) return;
+    const t = importTarget;
+    importTarget = null;
+    t.loading = true;
+    try {
+      const n = await invoke<number>('import_csv', {
+        connId: t.connId,
+        dbname: t.dbname,
+        table: t.table,
+        path: (file as unknown as { path: string }).path,
+      });
+      t.exportMsg = `已导入 ${n} 行`;
+      await loadTablePage(t);
+    } catch (e) {
+      t.error = String(e);
+    } finally {
+      t.loading = false;
+    }
+  }
+
   // 表 SQL 预览 → 在查询编辑器打开
   // 注意：dbname 是数据库名不是 schema，表在 public schema 下
   function tablePreviewSql(t: QueryTab): string {
@@ -2005,6 +2037,9 @@
                   disabled={!canEdit(activeTab) || activeTab.selectedRowIdx === null || activeTab.loading}
                   >🗑 删除行</button
                 >
+                <button onclick={() => importTable(activeTab)} disabled={activeTab.loading}>
+                  ⤒ 导入 CSV
+                </button>
                 <button onclick={() => exportTable(activeTab)} disabled={activeTab.loading}>
                   ⬇ 导出 CSV
                 </button>
@@ -2025,6 +2060,13 @@
                   {canEdit(activeTab) ? '双击单元格编辑 · 点击行选中' : '无主键表仅可新增/导出'}
                 </span>
               </div>
+              <input
+                type="file"
+                accept=".csv"
+                bind:this={importFileInput}
+                onchange={onImportFileSelected}
+                style="display: none"
+              />
               <div class="result">
                 {#if activeTab.exportMsg}
                   <div class="ok">✓ {activeTab.exportMsg}</div>

@@ -1274,6 +1274,109 @@ pub async fn export_csv(
 }
 
 
+/// 核心：导入 CSV 到目标表
+/// 表头列名与目标表列匹配（仅导入匹配列），PG 用 COPY 流式（快），空字段视为 NULL
+async fn import_csv_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    table: &str,
+    path: &str,
+) -> Result<u64, String> {
+    use futures::SinkExt;
+
+    // 目标表列（表头匹配用）
+    let cols = list_columns_core(cfg, dbname, table).await?;
+    if cols.is_empty() {
+        return Err(format!("目标表「{table}」没有可导入的列"));
+    }
+    let target_cols: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+
+    // 读 CSV 表头
+    let mut rdr = csv::Reader::from_path(path)
+        .map_err(|e| format!("读取 CSV 失败: {e}"))?;
+    let headers = rdr
+        .headers()
+        .map_err(|e| format!("解析表头失败: {e}"))?
+        .clone();
+    let headers: Vec<String> = headers.iter().map(|h| h.trim().to_string()).collect();
+
+    // 匹配列（CSV 表头 ∩ 目标列，大小写不敏感）
+    let mut matched: Vec<usize> = Vec::new(); // CSV 列索引
+    let mut matched_names: Vec<String> = Vec::new();
+    for (i, h) in headers.iter().enumerate() {
+        if target_cols.iter().any(|c| c.eq_ignore_ascii_case(h)) {
+            matched.push(i);
+            matched_names.push(h.clone());
+        }
+    }
+    if matched.is_empty() {
+        return Err(format!("CSV 表头与目标表列无匹配（目标列: {}）", target_cols.join(", ")));
+    }
+
+    let (client, _version) = open_connection(cfg).await?;
+    let qcols: Vec<String> = matched_names
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect();
+    let copy_sql = format!(
+        "COPY {} ({}) FROM STDIN WITH (FORMAT csv, HEADER false, NULL '')",
+        quote_ident(table),
+        qcols.join(", ")
+    );
+    let mut sink = Box::pin(
+        client
+            .copy_in(&copy_sql)
+            .await
+            .map_err(|e| format!("COPY 启动失败: {copy_sql} / {e}"))?,
+    );
+
+    let mut count: u64 = 0;
+    let mut rec_iter = rdr.records();
+    while let Some(rec) = rec_iter.next() {
+        let rec = rec.map_err(|e| format!("解析第 {} 行失败: {e}", count + 2))?;
+        // 用 csv Writer 重排并转义为一行
+        let mut wtr = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(vec![]);
+        let vals: Vec<&str> = matched.iter().map(|&i| rec.get(i).unwrap_or("")).collect();
+        wtr.write_record(&vals).map_err(|e| e.to_string())?;
+        wtr.flush().map_err(|e| e.to_string())?;
+        let bytes: Vec<u8> = wtr.into_inner().map_err(|e| e.to_string())?;
+        sink.as_mut()
+            .send(bytes::Bytes::from(bytes))
+            .await
+            .map_err(|e| format!("写入第 {} 行失败: {e}", count + 2))?;
+        count += 1;
+    }
+    sink.as_mut()
+        .finish()
+        .await
+        .map_err(|e| format!("COPY 提交失败: {e}"))?;
+    Ok(count)
+}
+
+
+/// 导入 CSV（Tauri command 入口）
+#[tauri::command]
+pub async fn import_csv(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+    table: String,
+    path: String,
+) -> Result<u64, String> {
+    let entry = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
+    };
+    if entry.cfg.is_sqlite() {
+        return crate::db::sqlite::import_csv(&entry, &dbname, &table, &path).await;
+    }
+    let cfg = entry.cfg.clone();
+    import_csv_core(&cfg, &dbname, &table, &path).await
+}
+
+
 /// 核心：EXPLAIN (ANALYZE, BUFFERS)。仅允许 SELECT（ANALYZE 会真实执行，DML 有副作用）
 /// 跳过 SQL 开头的注释（-- 行注释 / /* */ 块注释），返回第一个语句起点
 fn strip_leading_comments(mut s: &str) -> &str {
@@ -3070,6 +3173,58 @@ mod tests {
         assert!(content.contains("机械键盘"), "应包含已有数据");
         assert!(content.contains("测试商品") == false, "不应包含已删除数据");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn test_import_csv() {
+        let cfg = test_cfg();
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        // 建临时表
+        client
+            .batch_execute("DROP TABLE IF EXISTS tusk_import_test; CREATE TABLE tusk_import_test (id INTEGER PRIMARY KEY, name TEXT, price NUMERIC)")
+            .await
+            .expect("建表失败");
+        // 写 CSV（表头乱序 + 引号转义 + 空值）
+        let csv_path = "/tmp/tusk_import_test.csv";
+        std::fs::write(
+            csv_path,
+            "price,name,id\n9.9,\"键盘, 机械\",1\n19.5,鼠标,2\n,耳机,3\n",
+        )
+        .expect("写 CSV 失败");
+        let n = import_csv_core(&cfg, "tusk_demo", "tusk_import_test", csv_path)
+            .await
+            .expect("导入失败");
+        assert_eq!(n, 3, "应导入 3 行");
+        // 验证
+        let rows = client
+            .query(
+                "SELECT id, name, price FROM tusk_import_test ORDER BY id",
+                &[],
+            )
+            .await
+            .expect("查询失败");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].get::<_, i32>(0), 1);
+        assert_eq!(rows[0].get::<_, String>(1), "键盘, 机械", "引号逗号应正确解析");
+        let price = rows[0]
+            .try_get::<_, crate::models::NumericString>(2)
+            .expect("price 反序列化失败");
+        assert_eq!(price.0, "9.9");
+        assert!(rows[2].get::<_, Option<crate::models::NumericString>>(2).is_none(), "空字段应导入为 NULL");
+        // 无匹配表头报错
+        let csv2 = "/tmp/tusk_import_nomatch.csv";
+        std::fs::write(csv2, "foo,bar\n1,2\n").expect("写 CSV 失败");
+        let err = import_csv_core(&cfg, "tusk_demo", "tusk_import_test", csv2)
+            .await
+            .expect_err("无匹配列应报错");
+        assert!(err.contains("无匹配"), "报错应提示列不匹配: {err}");
+        // 清理
+        client
+            .batch_execute("DROP TABLE IF EXISTS tusk_import_test")
+            .await
+            .ok();
+        std::fs::remove_file(csv_path).ok();
+        std::fs::remove_file(csv2).ok();
     }
 
     #[tokio::test]
