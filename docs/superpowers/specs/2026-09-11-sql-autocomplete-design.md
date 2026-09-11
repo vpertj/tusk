@@ -1,7 +1,7 @@
 # SQL 编辑器代码补全 设计文档
 
 日期:2026-09-11
-状态:已通过对话评审,待实施计划
+状态:已实现并发布(v1.5.0)。本文档已同步为**实际行为**:实现时按「标准编辑器习惯」调整过弹出门槛与候选组合,第 4.3/4.4 节与第 5 节以代码为准。
 
 ## 1. 背景与目标
 
@@ -172,6 +172,8 @@ export function complete(input: {
   caret: number;
   dialect: 'postgresql' | 'sqlite' | 'merged';
   schema: { tables: string[]; columns: Record<string, { name: string }[]> };
+  /** 手动触发(Ctrl/Cmd+Space):空前缀、无上下文也弹 */
+  force?: boolean;
 }): { items: CompletionItem[]; replaceFrom: number; replaceTo: number } | null;
 ```
 
@@ -191,10 +193,12 @@ export function complete(input: {
 
 | 触发 | 候选 |
 | --- | --- |
-| `FROM` `JOIN` `UPDATE` `INTO` `TABLE` | 表名 |
-| `SELECT` `WHERE` `AND` `OR` `ON` `GROUP BY` `ORDER BY` `HAVING` `SET` `BY` `USING` `RETURNING` | 字段名(本语句涉及的表优先,其余表其次) |
-| `xxx.`(qualified) | 该表的字段 |
-| 其他(语句开头、`(` 或 `)` 之后等) | 关键字 + 函数 + 表名混排 |
+| `FROM` `JOIN` `UPDATE` `INTO` `TABLE` | 只给表名 |
+| `SELECT` `WHERE` `AND` `OR` `ON` `GROUP BY` `ORDER BY` `HAVING` `SET` `BY` `USING` `RETURNING` | 字段名优先(本语句涉及的表优先,其余表其次),其后依次是函数与关键字 |
+| `xxx.`(qualified) | 只给该表的字段 |
+| 其他(语句开头、`(` 或 `)` 之后等) | 表名 + 函数 + 关键字混排 |
+
+字段上下文里也一并给出函数与关键字(否则 `WHERE EXIS` 连 `EXISTS` 都补不出来),排序仍保证字段在最前面。
 
 qualified 模式的别名解析:在**当前语句**中用 `FROM|JOIN <表名> [AS] <别名>` 建立 别名→表 映射(大小写不敏感);限定符不是已知别名时,按表名直接匹配。解析不到就返回该位置可见的字段全集。
 
@@ -203,22 +207,25 @@ qualified 模式的别名解析:在**当前语句**中用 `FROM|JOIN <表名> [A
 ### 4.4 过滤、排序与大小写
 
 - case-insensitive 前缀匹配。
-- 排序权重:字段/表 > 函数 > 关键字;同权重按「前缀匹配更靠前」再按字典序。
+- 排序权重:字段/表 > 函数 > 关键字;同权重按标签长度(更短的靠前),再按字典序,最后保持候选项的原始顺序(稳定排序)。
 - 关键字与函数**一律大写**输出;表名与字段名按数据库中的原名输出。
-- 触发门槛:普通位置前缀长度 ≥ 1 才弹;`xxx.` 后长度为 0 也弹。
-- 候选上限 50 条。
+- 同一个标签(大小写不敏感)只保留第一次出现的那条。
+- **弹出门槛**:空前缀也弹,只要光标处在有意义的位置——刚在 `FROM`/`JOIN`/`SELECT`/`WHERE` 这类上下文关键字之后、`xxx.` 之后、引号内,或由 `Ctrl/Cmd+Space` 手动触发(`force: true`)。**空白编辑器**(没有任何上下文)不弹,避免一打开页签就冒出一个列表。
+- 候选上限 50 条。**已知取舍**:空前缀时的排序是「表 → 函数 → 关键字」加 50 条上限,而 PG 函数表有 150+ 条,所以手动触发时列表里基本看不到关键字;输入一个字母即可正常过滤到关键字。
 
 ### 4.5 不补全的情形
 
 - 光标位于字符串字面量或注释内部 → 返回 `null`。
 - 输入法组合期间(`compositionstart` 到 `compositionend` 之间)→ 不计算、不弹、不接管按键。
+- 选区非折叠(用户选了文字)→ 组件直接关闭,不计算。
+- 过滤后没有任何候选 → 返回 `null`,不弹空浮层。
 
 ## 5. 交互与浮层
 
 - 浮层绝对定位在 `.editor` 容器内(`position: relative`),`max-height: 200px` 可滚动,每个候选左侧用一个小标签区分类型(表 / 字段 / 函数 / 关键字),选中项用 `#1d2a44` 底 + `#4fc3f7` 文字。
 - **光标坐标**:一个与 textarea 同字体、同字号、同行高、同 padding、同宽、同 `white-space: pre-wrap` 的隐藏镜像 `div`(绝对定位、`visibility: hidden`),内容为「caret 前文本 + 测量 `<span>` + caret 后文本」,取 span 的 `offsetLeft/offsetTop`,再减去 textarea 的 `scrollTop/scrollLeft`,浮层放在该行的下一行(`top + lineHeight`)。
 - **翻转**:若浮层底部超出 textarea 可视高度,则改为向上弹出。
-- **键位**(仅浮层打开时接管,均 `preventDefault`):
+- **键位**(浮层打开时接管,均 `preventDefault`):
 
   | 键 | 行为 |
   | --- | --- |
@@ -226,10 +233,11 @@ qualified 模式的别名解析:在**当前语句**中用 `FROM|JOIN <表名> [A
   | Tab | 接受当前候选 |
   | Esc | 关闭浮层 |
   | Enter | 关闭浮层,**不拦截**,照常换行 |
-  | 鼠标点击候选 | 接受 |
+  | Ctrl / Cmd + Space | 手动触发并重新计算(任何位置都能唤出) |
+  | 鼠标点击候选 | 接受(用 `mousedown` + `preventDefault`,避免先触发 blur) |
 
-- **接受**动作:`const ins = item.insertText ?? item.label`,然后 `value = value.slice(0, replaceFrom) + ins + value.slice(replaceTo)`,随后把 `selectionStart/selectionEnd` 设为插入文本末尾,并关闭浮层。
-- 继续输入、移动光标、切换页签都重新计算或关闭浮层。
+- **重新计算 / 关闭的时机**:输入字符 → 重新计算;点击、`←`/`→`/`Home`/`End`/`PageUp`/`PageDown` 移动光标、失焦 → 关闭(单纯移动光标不再乱弹,要弹用 Ctrl/Cmd+Space);滚动 → 重新定位;输入法组合期间 → 不弹也不接管;选区非折叠 → 关闭。
+- **接受**动作:`const ins = item.insertText ?? item.label`,然后 `value = value.slice(0, replaceFrom) + ins + value.slice(replaceTo)`,`await tick()` 等 DOM 更新后再把 `selectionStart/selectionEnd` 设为插入文本末尾并关闭浮层。必须用 `tick()` 而不是 `Promise.resolve()`——后者与 Svelte 的 flush 同为微任务、顺序无保证,可能把光标设到更新前的旧值上。
 - 浮层配色沿用现有深色变量:底 `#1b1e25`、边 `#2c303a`、次要文字 `#6b7484`。
 
 ## 6. 降级与错误处理
@@ -253,9 +261,12 @@ qualified 模式的别名解析:在**当前语句**中用 `FROM|JOIN <表名> [A
 - 字符串与注释:`WHERE x = 'a;b'` 后面的位置按**同一条语句**处理,不被 `;` 截断;光标在 `'...'` 或 `-- ...` 内 → 返回 `null`。
 - 替换范围:`u.na|` 的 `replaceFrom` 只覆盖 `na`;带引号的 `"book_pa|` 的 `replaceFrom` 指向开引号且候选的 `insertText` 是 `"book_pages"`。
 - 排序与大小写:前缀精确项排在前面;关键字输出大写、表名字段名保留原名;超过 50 条被截断。
+- 弹出门槛:`FROM` 之后空前缀就弹表名;空白编辑器不弹;`force` 时空前缀也弹候选;字段上下文里关键字(如 `EXISTS`)也补得出来。
 - 降级:`schema.columns` 为空对象 → 不产生 `column` 类型候选。
 
-Rust 侧:`list_columns_bulk` 按现有测试风格补测试(复用 `pg.rs` 测试模块的 `test_cfg()`,`tusk_demo` 库),断言返回的 map 覆盖预期表、字段数与 `is_pk` 正确;SQLite 侧用临时库断言(参考 `sqlite.rs:433` 现有 `list_columns` 测试)。与现有 30 个测试一起跑。
+Rust 侧:`list_columns_bulk` 按现有测试风格补测试(复用 `pg.rs` 测试模块的 `test_cfg()`,`tusk_demo` 库)。PG 测试在用例内自建普通表、视图与**物化视图**:断言前两者在图里、物化视图在 bulk 图与 `list_tables_core` 里**都不存在**(钉死"对象集合与 list_tables 一致、不含 `'m'`"),并用既有表 `products` 与单表 `list_columns_core` **逐字段比对**(name/type_name/is_nullable/default/is_pk/comment)保证类型表达式不漂移。SQLite 侧用临时库断言(参考 `sqlite.rs:433` 现有 `list_columns` 测试)。与现有 32 个测试一起跑,共 **34 个全绿**。
+
+> 注意:PG 测试**刻意不做**「bulk map 的 key 集合 == `list_tables_core` 返回集合」的字面相等断言——cargo 并行跑用例时,其他测试会建/删 `tusk_idx_{pid}`、`TestOrder` 之类的临时表,跨时刻的集合快照天然不可比。上述"物化视图两边都不含 + `products` 逐字段一致"是等价但确定性的检查。
 
 ## 8. 影响面与验证步骤
 
@@ -264,10 +275,12 @@ Rust 侧:`list_columns_bulk` 按现有测试风格补测试(复用 `pg.rs` 测�
 | 文件 | 改动 |
 | --- | --- |
 | `src/lib/sql-dialect.ts` | 新增 |
+| `src/lib/sql-dialect.test.ts` | 新增(3 个用例) |
 | `src/lib/sql-complete.ts` | 新增 |
-| `src/lib/sql-complete.test.ts` | 新增 |
+| `src/lib/sql-complete.test.ts` | 新增(28 个用例) |
+| `vitest.config.ts` | 新增(独立配置,不加载 SvelteKit 插件) |
 | `src/lib/components/SqlEditor.svelte` | 新增 |
-| `src/routes/+page.svelte` | 替换编辑器为组件;新增 `columnIndex`/`ensureSchema`/`invalidateSchema`/`schema` 派生;4 处失效点改调用;`disconnectConn` 清理新缓存 |
+| `src/routes/+page.svelte` | 替换编辑器为组件;新增 `columnIndex`/`ensureSchema`/`invalidateSchema`/补全 schema 派生;3 处结构变更走 `invalidateSchema`(结构同步那处按原始 key 直接删),`disconnectConn` 清理新缓存 |
 | `src-tauri/src/models.rs` | 不新增 DTO(复用 `SchemaColumn`) |
 | `src-tauri/src/db/pg.rs` | 新增 `list_columns_bulk` + `list_columns_bulk_core` + 测试 |
 | `src-tauri/src/db/sqlite.rs` | 新增 `list_columns_bulk` + 测试 |
@@ -276,9 +289,12 @@ Rust 侧:`list_columns_bulk` 按现有测试风格补测试(复用 `pg.rs` 测�
 
 验证顺序(每步通过才进下一步):
 
-1. `cargo test`(在 `src-tauri`)→ 全绿,含新增的 bulk 测试。
-2. `npm test` → 引擎纯函数用例全绿。
+1. `cargo test`(在 `src-tauri`)→ 34 passed; 0 failed(含新增的 2 个 bulk 测试)。
+2. `npm test` → 31 passed(引擎 28 + 方言 3)。
 3. `npm run check` → 0 error 0 warning。
 4. `npm run build` → 构建通过。
-5. 手动实测(`npm run tauri dev`):`SELECT * FROM bo|` 提示表;`SELECT u.| FROM book_pages u` 只提示该表字段;字符串里的 `;` 不干扰;Tab 接受、Enter 换行、Esc 关闭、Cmd+Enter 执行、Cmd+↑/↓ 历史均正常;断开连接后重新连接,补全仍可用。
-6. 断网/无权限场景:字段加载失败时只剩关键字与表名候选,无错误弹窗。
+5. 本地 `npm run tauri build` → 产出 `Tusk_<版本>_aarch64.dmg`(发版前的真实打包验证)。
+6. 手动实测(`npm run tauri dev`):`SELECT * FROM ` 立即弹表名;`SELECT b.| FROM books b` 只提示该表字段;字符串里的 `;` 不干扰;Tab 接受、Enter 换行、Esc 关闭、Ctrl/Cmd+Space 唤出、Cmd+Enter 执行、Cmd+↑/↓ 历史均正常;断开连接后重新连接,补全仍可用。
+7. 降级场景:字段加载失败时只剩关键字 + 函数 + 表名候选,无错误弹窗、不打断输入。
+
+第 1-5 项在 v1.5.0 发布前已全部跑通;第 6/7 项由人工在应用窗口内确认。
