@@ -1027,7 +1027,7 @@
   }
 
   // ===== 检查更新（GitHub Releases + 自动下载安装） =====
-  const APP_VERSION = '1.5.1';
+  const APP_VERSION = '1.5.2';
   let updateInfo = $state<{
     version: string;
     notes: string;
