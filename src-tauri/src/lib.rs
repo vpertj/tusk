@@ -24,6 +24,7 @@ pub fn run() {
             list_databases,
             list_tables,
             list_columns,
+            list_columns_bulk,
             paginate_table,
             save_connection,
             list_connections,

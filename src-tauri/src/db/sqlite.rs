@@ -177,6 +177,60 @@ pub async fn list_columns(entry: &ConnEntry, _dbname: &str, table: &str) -> Resu
     Ok(out)
 }
 
+/// 整库字段批量列出：同一条连接内遍历所有表（SQL 编辑器补全预热用）
+pub async fn list_columns_bulk(
+    entry: &ConnEntry,
+    _dbname: &str,
+) -> Result<std::collections::HashMap<String, Vec<SchemaColumn>>, String> {
+    let conn = conn_of(entry)?.lock().await;
+    // 先取全部表名，避免遍历时重复准备语句
+    let tables: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .map_err(|e| format!("SQL 错误: {e}"))?;
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("查询失败: {e}"))?;
+        let mut out = Vec::new();
+        for n in names {
+            out.push(n.map_err(|e| e.to_string())?);
+        }
+        out
+    };
+
+    let mut map = std::collections::HashMap::new();
+    for table in tables {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info(\"{}\")", table.replace('"', "\"\"")))
+            .map_err(|e| format!("SQL 错误: {e}"))?;
+        let cols = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|e| format!("查询失败: {e}"))?;
+        let mut out = Vec::new();
+        for c in cols {
+            let (name, ty, notnull, dflt, pk) = c.map_err(|e| e.to_string())?;
+            out.push(SchemaColumn {
+                name,
+                type_name: ty,
+                is_nullable: if notnull == 0 { "YES".into() } else { "NO".into() },
+                default: dflt,
+                is_pk: pk > 0,
+                comment: None,
+            });
+        }
+        map.insert(table, out);
+    }
+    Ok(map)
+}
+
 /// 分页浏览
 pub async fn paginate_table(
     entry: &ConnEntry,
@@ -484,6 +538,48 @@ mod tests {
             assert!(err.contains("无匹配"), "报错应提示列不匹配: {err}");
             let _ = std::fs::remove_file(csv_path);
             let _ = std::fs::remove_file(csv2);
+        });
+
+        // 清理
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // bulk 列查询：一条连接内遍历所有表，主键标记正确
+    #[test]
+    fn test_sqlite_list_columns_bulk() {
+        let dir = std::env::temp_dir().join(format!("tusk_sqlite_bulk_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("bulk.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let entry = test_entry(db_path.to_str().unwrap());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            query(&entry, "CREATE TABLE a (id INTEGER PRIMARY KEY, name TEXT)")
+                .await
+                .expect("建表 a 失败");
+            query(&entry, "CREATE TABLE b (k TEXT NOT NULL, v TEXT)")
+                .await
+                .expect("建表 b 失败");
+
+            let map = list_columns_bulk(&entry, "main").await.expect("bulk 列查询失败");
+            assert_eq!(map.len(), 2, "应有两张表");
+
+            let a = map.get("a").expect("表 a 应在图里");
+            assert_eq!(a.len(), 2, "表 a 应有 2 个字段");
+            assert!(
+                a.iter().any(|c| c.name == "id" && c.is_pk),
+                "a.id 应标记为主键"
+            );
+            assert!(
+                a.iter().any(|c| c.name == "name" && !c.is_pk),
+                "a.name 不应标记为主键"
+            );
+
+            let b = map.get("b").expect("表 b 应在图里");
+            assert_eq!(b.len(), 2, "表 b 应有 2 个字段");
+            assert!(b.iter().all(|c| !c.is_pk), "b 无主键");
         });
 
         // 清理

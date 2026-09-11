@@ -393,6 +393,25 @@ pub async fn list_columns(
 }
 
 
+/// 整库字段批量列出（Tauri command 入口，SQL 编辑器补全预热）
+#[tauri::command]
+pub async fn list_columns_bulk(
+    state: State<'_, AppState>,
+    conn_id: String,
+    dbname: String,
+) -> Result<std::collections::HashMap<String, Vec<SchemaColumn>>, String> {
+    let entry = {
+        let conns = state.conns.lock().await;
+        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
+    };
+    if entry.cfg.is_sqlite() {
+        return crate::db::sqlite::list_columns_bulk(&entry, &dbname).await;
+    }
+    let cfg = entry.cfg.clone();
+    list_columns_bulk_core(&cfg, &dbname).await
+}
+
+
 /// 核心：列出集群内数据库（pg_database 集群级，当前连接即可查）
 async fn list_databases_core(client: &Client) -> Result<Vec<DatabaseInfo>, String> {
     let rows = client
@@ -651,6 +670,82 @@ async fn list_columns_core(
             comment: r.get(4),
         })
         .collect())
+}
+
+
+/// 核心：一次连接拉出整库字段（SQL 编辑器补全预热）
+/// 对象集合必须与 list_tables_core 完全一致：只 public、只 ('r','p','v')
+async fn list_columns_bulk_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+) -> Result<std::collections::HashMap<String, Vec<SchemaColumn>>, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+
+    // 查询 1：全库字段（类型表达式与 list_columns_core 保持一致），按 表名, attnum 排序
+    let col_rows = client
+        .query(
+            "SELECT c.relname, a.attname,
+               CASE WHEN a.atttypmod > 0 THEN
+                 CASE t.typname
+                   WHEN 'varchar' THEN 'varchar(' || (a.atttypmod - 4) || ')'
+                   WHEN 'numeric' THEN 'numeric(' || ((a.atttypmod - 4) >> 16) || ',' || ((a.atttypmod - 4) & 65535) || ')'
+                   ELSE t.typname END
+               ELSE t.typname END,
+               CASE WHEN NOT a.attnotnull THEN 'YES' ELSE 'NO' END,
+               pg_get_expr(d.adbin, d.adrelid),
+               col_description(a.attrelid, a.attnum)
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_attribute a ON a.attrelid = c.oid
+             JOIN pg_type t ON t.oid = a.atttypid
+             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+             WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v')
+               AND a.attnum > 0 AND NOT a.attisdropped
+             ORDER BY c.relname, a.attnum",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("查询字段失败: {e}"))?;
+
+    // 查询 2：全库主键（一次查完，内存里按表名 + 字段名标记）
+    let pk_rows = client
+        .query(
+            "SELECT cl.relname, a.attname
+             FROM pg_constraint c
+             JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+             JOIN pg_class cl ON cl.oid = c.conrelid
+             JOIN pg_namespace n ON n.oid = cl.relnamespace
+             WHERE n.nspname = 'public' AND c.contype = 'p'
+             ORDER BY cl.relname, k.ord",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("查询主键失败: {e}"))?;
+    let pks: std::collections::HashSet<(String, String)> = pk_rows
+        .iter()
+        .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
+        .collect();
+
+    // 按表名分组（查询 1 已按 relname, attnum 排序，value 天然保持 attnum 顺序）
+    let mut map: std::collections::HashMap<String, Vec<SchemaColumn>> =
+        std::collections::HashMap::new();
+    for r in &col_rows {
+        let rel: String = r.get(0);
+        let att: String = r.get(1);
+        let is_pk = pks.contains(&(rel.clone(), att.clone()));
+        map.entry(rel).or_default().push(SchemaColumn {
+            name: att,
+            type_name: r.get(2),
+            is_nullable: r.get(3),
+            default: r.get(4),
+            is_pk,
+            comment: r.get(5),
+        });
+    }
+    Ok(map)
 }
 
 
@@ -4317,6 +4412,97 @@ mod tests {
         // 清理
         admin.execute(&format!("DROP DATABASE IF EXISTS \"{src}\" WITH (FORCE)"), &[]).await.unwrap();
         admin.execute(&format!("DROP DATABASE IF EXISTS \"{dst}\" WITH (FORCE)"), &[]).await.unwrap();
+    }
+
+    // bulk 列查询：一次连接拉全库字段，对象集合与 list_tables_core 语义一致
+    #[tokio::test]
+    async fn test_list_columns_bulk() {
+        let cfg = test_cfg();
+        // 造一张带主键的临时表 + 一张视图 + 一张物化视图，验证对象集合语义
+        let tname = format!("tusk_bulk_src_{}", std::process::id());
+        let vname = format!("tusk_bulk_view_{}", std::process::id());
+        let mname = format!("tusk_bulk_mv_{}", std::process::id());
+        create_table_core(
+            &cfg,
+            "tusk_demo",
+            &tname,
+            vec![
+                ColumnDef { name: "id".into(), col_type: "serial".into(), nullable: false, default: None, is_pk: true, is_serial: true, comment: None },
+                ColumnDef { name: "name".into(), col_type: "text".into(), nullable: true, default: None, is_pk: false, is_serial: false, comment: None },
+            ],
+            None,
+        )
+        .await
+        .expect("建表失败");
+        create_view_core(&cfg, "tusk_demo", &vname, &format!("SELECT id, name FROM \"{tname}\""))
+            .await
+            .expect("建视图失败");
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        client
+            .execute(&format!("CREATE MATERIALIZED VIEW \"{mname}\" AS SELECT 1 AS n"), &[])
+            .await
+            .expect("建物化视图失败");
+
+        let map = list_columns_bulk_core(&cfg, "tusk_demo")
+            .await
+            .expect("bulk 列查询失败");
+
+        // 整库字段图非空
+        assert!(!map.is_empty(), "整库字段图不应为空");
+
+        // products 是 tusk_demo 里确认存在的表：字段非空且 id 是主键
+        let products = map.get("products").expect("products 应在图里");
+        assert!(!products.is_empty(), "products 字段不应为空");
+        assert!(
+            products.iter().any(|c| c.name == "id" && c.is_pk),
+            "products.id 应标记为主键"
+        );
+
+        // 至少有一张表存在主键字段（不依赖具体表结构）
+        assert!(
+            map.values().any(|cols| cols.iter().any(|c| c.is_pk)),
+            "至少应有一张表的字段标记为主键"
+        );
+
+        // bulk 字段必须与单表 list_columns_core 逐字段一致（类型表达式不能漂移）
+        let single = list_columns_core(&cfg, "tusk_demo", "products")
+            .await
+            .expect("单表列查询失败");
+        assert_eq!(products.len(), single.len(), "products 字段数应与单表查询一致");
+        for (b, s) in products.iter().zip(single.iter()) {
+            assert_eq!(b.name, s.name, "字段名应一致");
+            assert_eq!(b.type_name, s.type_name, "类型应一致: {}", b.name);
+            assert_eq!(b.is_nullable, s.is_nullable, "可空标记应一致: {}", b.name);
+            assert_eq!(b.default, s.default, "默认值应一致: {}", b.name);
+            assert_eq!(b.is_pk, s.is_pk, "主键标记应一致: {}", b.name);
+            assert_eq!(b.comment, s.comment, "注释应一致: {}", b.name);
+        }
+
+        // 普通表与视图都应在图里，字段顺序按 attnum
+        assert!(map.contains_key(&tname), "新建的普通表应在图里");
+        let view_cols = map.get(&vname).expect("视图应在图里");
+        assert_eq!(view_cols.len(), 2, "视图应有 2 个字段");
+        assert_eq!(view_cols[0].name, "id", "字段应按 attnum 顺序");
+
+        // 对象集合与 list_tables_core 对齐：物化视图（relkind='m'）两边都不含
+        // 注意：不直接比对两次查询的集合——其他测试会并发建/删临时表，两次快照天然不同步
+        let tables = list_tables_core(&cfg, "tusk_demo").await.expect("列表失败");
+        assert!(
+            !tables.iter().any(|t| t.name == mname),
+            "list_tables 不应含物化视图"
+        );
+        assert!(
+            !map.contains_key(&mname),
+            "bulk 图不应含物化视图（否则前端会拿到 list_tables 里没有的表）"
+        );
+
+        // 清理
+        drop_view_core(&cfg, "tusk_demo", &vname).await.expect("清理视图失败");
+        drop_table_core(&cfg, "tusk_demo", &tname).await.expect("清理表失败");
+        client
+            .execute(&format!("DROP MATERIALIZED VIEW \"{mname}\""), &[])
+            .await
+            .expect("清理物化视图失败");
     }
 }
 
