@@ -1998,22 +1998,149 @@ pub async fn sync_data(
 }
 
 
-#[tauri::command]
-pub async fn check_update() -> Result<serde_json::Value, String> {
-    // 走 Rust 网络栈（ureq），避免 WebView 网络限制；GitHub API 匿名可读
-    let url = "https://api.github.com/repos/vpertj/tusk/releases/latest";
-    let resp = tokio::task::spawn_blocking(move || {
-        ureq::get(url)
+/// 仓库 Releases 页面（手动下载入口，也是备用通道的基址）
+const RELEASES_PAGE: &str = "https://github.com/vpertj/tusk/releases";
+
+/// 从 `.../releases/tag/<tag>` 跳转地址里取出 tag
+fn parse_tag_from_location(location: &str) -> Option<String> {
+    let marker = "/releases/tag/";
+    let idx = location.find(marker)? + marker.len();
+    let tail = &location[idx..];
+    let tag = tail
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/');
+    if tag.is_empty() {
+        None
+    } else {
+        Some(tag.to_string())
+    }
+}
+
+/// 从 expanded_assets 的 HTML 里取出 dmg 下载地址
+/// （注意：release 的 tag 页面里资源列表是懒加载的，抓不到，必须抓 expanded_assets）
+fn extract_dmg_url(html: &str) -> Option<String> {
+    // 按引号切分，逐段看属性值：必须同时满足"含 /releases/download/"且以 .dmg 结尾
+    for seg in html.split(['"', '\'']) {
+        if !seg.ends_with(".dmg") || !seg.contains("/releases/download/") {
+            continue;
+        }
+        if seg.starts_with("http://") || seg.starts_with("https://") {
+            return Some(seg.to_string());
+        }
+        if seg.starts_with('/') {
+            return Some(format!("https://github.com{seg}"));
+        }
+    }
+    None
+}
+
+/// 备用通道拿不到资源列表时，按构建产物命名规则拼 dmg 地址
+fn fallback_dmg_url(tag: &str) -> String {
+    let version = tag.trim_start_matches('v');
+    format!("{RELEASES_PAGE}/download/{tag}/Tusk_{version}_aarch64.dmg")
+}
+
+/// 两条通道都失败时给用户看的文案
+fn friendly_check_error(api_err: &str, web_err: &str) -> String {
+    let hint = if api_err.contains("403") || api_err.contains("429") || api_err.contains("限流") {
+        "（GitHub 未认证接口按出口 IP 限流 60 次/小时，共享或 VPN 出口容易被别的流量用尽，通常几十分钟后自行恢复）"
+    } else {
+        ""
+    };
+    format!(
+        "检查更新失败{hint}。首选通道：{api_err}；备用通道：{web_err}。也可以直接到 {RELEASES_PAGE} 手动下载。"
+    )
+}
+
+/// GET 文本（带 UA、超时、网络类错误重试一次）。返回 (body, x-ratelimit-reset)
+fn http_get_text(url: &str, accept: &str, timeout_secs: u64) -> Result<(String, Option<i64>), String> {
+    let mut last = format!("{url}: 未知错误");
+    for attempt in 0..2 {
+        match ureq::get(url)
             .set("User-Agent", "tusk-desktop")
-            .set("Accept", "application/vnd.github+json")
-            .timeout(std::time::Duration::from_secs(10))
+            .set("Accept", accept)
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .call()
-            .map_err(|e| format!("检查更新失败: {e}"))?
-            .into_string()
-            .map_err(|e| format!("读取响应失败: {e}"))
+        {
+            Ok(resp) => {
+                let reset = resp
+                    .header("x-ratelimit-reset")
+                    .and_then(|v| v.parse::<i64>().ok());
+                let body = resp.into_string().map_err(|e| format!("读取响应失败: {e}"))?;
+                return Ok((body, reset));
+            }
+            Err(ureq::Error::Status(code, resp)) if (400..500).contains(&code) => {
+                // 4xx 是确定性失败（限流 403 就在这类），重试只会白耗额度
+                let reset = resp
+                    .header("x-ratelimit-reset")
+                    .and_then(|v| v.parse::<i64>().ok());
+                let detail = match reset {
+                    Some(ts) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        format!("status code {code}（限流，约 {} 分钟后恢复）", ((ts - now).max(0) + 59) / 60)
+                    }
+                    None => format!("status code {code}"),
+                };
+                return Err(format!("{url}: {detail}"));
+            }
+            Err(e) => last = format!("{url}: {e}"),
+        }
+        if attempt == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+    }
+    Err(last)
+}
+
+/// 只读跳转响应的 Location（不自动跟随 —— 302 本身就是版本号的来源）
+fn http_get_location(url: &str, timeout_secs: u64) -> Result<String, String> {
+    let agent = ureq::builder().redirects(0).build();
+    let mut last = format!("{url}: 未知错误");
+    for attempt in 0..2 {
+        let resp = match agent
+            .get(url)
+            .set("User-Agent", "tusk-desktop")
+            .set("Accept", "text/html")
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .call()
+        {
+            Ok(resp) => Some(resp),
+            Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => Some(resp),
+            Err(e) => {
+                last = format!("{url}: {e}");
+                None
+            }
+        };
+        if let Some(resp) = resp {
+            let status = resp.status();
+            return match resp.header("location") {
+                Some(loc) => Ok(loc.to_string()),
+                None => Err(format!("{url}: 响应缺少 Location 头（status {status}）")),
+            };
+        }
+        if attempt == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+    }
+    Err(last)
+}
+
+/// 首选通道：GitHub API（结构化数据，含 release notes，但受按 IP 的 60 次/小时限制）
+async fn check_update_via_api() -> Result<serde_json::Value, String> {
+    let (resp, _reset) = tokio::task::spawn_blocking(|| {
+        http_get_text(
+            "https://api.github.com/repos/vpertj/tusk/releases/latest",
+            "application/vnd.github+json",
+            20,
+        )
     })
     .await
-    .map_err(|e| format!("检查更新失败: {e}"))??;
+    .map_err(|e| format!("检查更新任务失败: {e}"))??;
     let v: serde_json::Value =
         serde_json::from_str(&resp).map_err(|e| format!("解析响应失败: {e}"))?;
     // 找 .dmg 资产下载地址
@@ -2036,6 +2163,40 @@ pub async fn check_update() -> Result<serde_json::Value, String> {
         "html_url": v.get("html_url").and_then(|u| u.as_str()).unwrap_or(""),
         "asset_url": asset_url,
     }))
+}
+
+/// 备用通道：走 github.com 网页端点，不消耗 API 额度（代价是拿不到 release notes）
+async fn check_update_via_web() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let loc = http_get_location(&format!("{RELEASES_PAGE}/latest"), 20)?;
+        let tag = parse_tag_from_location(&loc)
+            .ok_or_else(|| format!("无法从跳转地址解析版本号: {loc}"))?;
+        let asset_url =
+            match http_get_text(&format!("{RELEASES_PAGE}/expanded_assets/{tag}"), "text/html", 20) {
+                Ok((html, _)) => extract_dmg_url(&html).unwrap_or_else(|| fallback_dmg_url(&tag)),
+                Err(_) => fallback_dmg_url(&tag),
+            };
+        Ok(serde_json::json!({
+            "tag_name": tag,
+            "body": "",
+            "html_url": format!("{RELEASES_PAGE}/tag/{tag}"),
+            "asset_url": asset_url,
+        }))
+    })
+    .await
+    .map_err(|e| format!("备用通道任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn check_update() -> Result<serde_json::Value, String> {
+    // 走 Rust 网络栈（ureq），避免 WebView 网络限制
+    match check_update_via_api().await {
+        Ok(v) => Ok(v),
+        Err(api_err) => match check_update_via_web().await {
+            Ok(v) => Ok(v),
+            Err(web_err) => Err(friendly_check_error(&api_err, &web_err)),
+        },
+    }
 }
 
 
@@ -4503,6 +4664,101 @@ mod tests {
             .execute(&format!("DROP MATERIALIZED VIEW \"{mname}\""), &[])
             .await
             .expect("清理物化视图失败");
+    }
+
+    // ===== 更新检查的备用通道（非 API，不吃 60 次/小时的按 IP 限额）=====
+
+    #[test]
+    fn test_parse_tag_from_location() {
+        assert_eq!(
+            parse_tag_from_location("https://github.com/vpertj/tusk/releases/tag/v1.5.1"),
+            Some("v1.5.1".to_string())
+        );
+        // 结尾斜杠
+        assert_eq!(
+            parse_tag_from_location("https://github.com/vpertj/tusk/releases/tag/v1.5.1/"),
+            Some("v1.5.1".to_string())
+        );
+        // 带查询串
+        assert_eq!(
+            parse_tag_from_location("https://github.com/o/r/releases/tag/v2.0.0?foo=1"),
+            Some("v2.0.0".to_string())
+        );
+        // 不是 tag 跳转（例如直接落在 latest）
+        assert_eq!(
+            parse_tag_from_location("https://github.com/vpertj/tusk/releases/latest"),
+            None
+        );
+        assert_eq!(parse_tag_from_location(""), None);
+    }
+
+    #[test]
+    fn test_extract_dmg_url_from_expanded_assets_html() {
+        // GitHub 的 expanded_assets 端点返回的是根相对路径
+        let html = r#"<div><a href="/vpertj/tusk/releases/download/v1.5.1/Tusk_1.5.1_aarch64.dmg" rel="nofollow">Tusk_1.5.1_aarch64.dmg</a></div>"#;
+        assert_eq!(
+            extract_dmg_url(html),
+            Some("https://github.com/vpertj/tusk/releases/download/v1.5.1/Tusk_1.5.1_aarch64.dmg".to_string())
+        );
+        // 绝对地址也要能取到
+        let abs = r#"<a href="https://github.com/vpertj/tusk/releases/download/v1.5.1/Tusk_1.5.1_aarch64.dmg">x</a>"#;
+        assert_eq!(
+            extract_dmg_url(abs),
+            Some("https://github.com/vpertj/tusk/releases/download/v1.5.1/Tusk_1.5.1_aarch64.dmg".to_string())
+        );
+        // 只有源码包（没有 dmg）时返回 None
+        let tarball = r#"<a href="/vpertj/tusk/archive/refs/tags/v1.5.1.tar.gz">Source</a>"#;
+        assert_eq!(extract_dmg_url(tarball), None);
+    }
+
+    #[test]
+    fn test_fallback_dmg_url_by_naming_rule() {
+        assert_eq!(
+            fallback_dmg_url("v1.5.1"),
+            "https://github.com/vpertj/tusk/releases/download/v1.5.1/Tusk_1.5.1_aarch64.dmg"
+        );
+        // 不带 v 前缀的 tag 也能拼对
+        assert_eq!(
+            fallback_dmg_url("1.5.1"),
+            "https://github.com/vpertj/tusk/releases/download/1.5.1/Tusk_1.5.1_aarch64.dmg"
+        );
+    }
+
+    #[test]
+    fn test_friendly_check_error_mentions_rate_limit_and_manual_url() {
+        let msg = friendly_check_error("检查更新失败: https://api.github.com/...: status code 403", "超时");
+        assert!(msg.contains("403"), "保留原始错误便于排查：{msg}");
+        assert!(msg.contains("限流"), "403 时应提示是限流：{msg}");
+        assert!(
+            msg.contains("https://github.com/vpertj/tusk/releases"),
+            "应给出手动下载入口：{msg}"
+        );
+        // 非限流错误不该误报限流
+        let other = friendly_check_error("连接被重置", "超时");
+        assert!(!other.contains("限流"), "非 403 不应说限流：{other}");
+    }
+
+    /// 网络冒烟测试：验证备用通道的接线（redirects(0) 读到 302、expanded_assets 抓到 dmg）
+    /// 默认不跑（依赖外网、会受出口链路抖动影响）：`cargo test -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "需要外网"]
+    async fn test_check_update_via_web_smoke() {
+        let v = check_update_via_web().await.expect("备用通道应能拿到最新版本");
+        let tag = v.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
+        let asset = v.get("asset_url").and_then(|u| u.as_str()).unwrap_or("");
+        println!("备用通道拿到: tag={tag} asset={asset}");
+        assert!(tag.starts_with('v'), "tag 形如 v1.5.1，实际: {tag}");
+        assert!(asset.ends_with(".dmg"), "应拿到 dmg 地址，实际: {asset}");
+        assert!(asset.contains(tag), "dmg 地址应属于该 tag: {asset}");
+    }
+
+    /// 网络冒烟测试：首选通道（API）仍能正常工作
+    #[tokio::test]
+    #[ignore = "需要外网"]
+    async fn test_check_update_via_api_smoke() {
+        let v = check_update_via_api().await.expect("API 通道应能拿到最新版本");
+        println!("API 通道拿到: {v}");
+        assert!(v.get("tag_name").and_then(|t| t.as_str()).unwrap_or("").starts_with('v'));
     }
 }
 
