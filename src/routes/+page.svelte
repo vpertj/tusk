@@ -1787,20 +1787,20 @@
       {showConnPanel}
       {savedConns}
       {connecting}
-      {dbType}
-      {sqlitePath}
-      {host}
-      {port}
-      {user}
-      {password}
-      {dbname}
-      {sshEnabled}
-      {sshHost}
-      {sshPort}
-      {sshUser}
-      {sshPass}
-      {connName}
-      {saveConn}
+      bind:dbType
+      bind:sqlitePath
+      bind:host
+      bind:port
+      bind:user
+      bind:password
+      bind:dbname
+      bind:sshEnabled
+      bind:sshHost
+      bind:sshPort
+      bind:sshUser
+      bind:sshPass
+      bind:connName
+      bind:saveConn
       {pgHelp}
       PG_INSTALL_CMD={PG_INSTALL_CMD}
       PG_START_CMD={PG_START_CMD}
