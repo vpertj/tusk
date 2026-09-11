@@ -10,31 +10,35 @@ use tokio_postgres::{Client, Row};
 use crate::models::*;
 use crate::state::*;
 
+/// 构建 libpq conninfo。空 user/password 必须省略：tokio-postgres 会跳过 '=' 后的
+/// 空白解析，"user=" 空值会把下一个键连同值吞成 user 的值（实测 user 变成 "dbname=xxx"）。
+fn build_conn_str(cfg: &ConnConfig, port: u16) -> String {
+    let mut s = format!("host={} port={}", cfg.host, port);
+    if !cfg.user.is_empty() {
+        s = format!("{s} user={}", cfg.user);
+    }
+    s = format!("{s} dbname={}", cfg.dbname);
+    if !cfg.password.is_empty() {
+        let pw = cfg.password.replace('\'', "\\'");
+        s = format!("{s} password='{pw}'");
+    }
+    s
+}
+
 /// 核心：建立 PostgreSQL 连接，返回可跨任务共享的 client 与服务器版本
 async fn open_connection(cfg: &ConnConfig) -> Result<(Arc<Client>, String), String> {
     // SSH 隧道：句柄必须随 connection task 保活
     let mut ssh_keep: Option<crate::db::ssh::SshTunnel> = None;
 
-    // libpq conninfo：空 password 字段会破坏解析，为空时省略，非空时加引号
-    let mut conn_str;
-    if cfg.ssh_enabled {
+    let port = if cfg.ssh_enabled {
         let tunnel = crate::db::ssh::open_tunnel(cfg, &cfg.ssh_pass).await?;
         let port = tunnel.local_port;
         ssh_keep = Some(tunnel);
-        conn_str = format!(
-            "host=127.0.0.1 port={port} user={} dbname={}",
-            cfg.user, cfg.dbname
-        );
+        port
     } else {
-        conn_str = format!(
-            "host={} port={} user={} dbname={}",
-            cfg.host, cfg.port, cfg.user, cfg.dbname
-        );
-    }
-    if !cfg.password.is_empty() {
-        let pw = cfg.password.replace('\'', "\\'");
-        conn_str = format!("{conn_str} password='{pw}'");
-    }
+        cfg.port
+    };
+    let conn_str = build_conn_str(cfg, port);
     let (client, connection) =
         tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
             .await
@@ -2833,6 +2837,37 @@ mod tests {
 
     fn whoami() -> String {
         std::env::var("USER").unwrap_or_else(|_| "tianjun".into())
+    }
+
+    // 连接串构建：空字段必须省略对应键。tokio-postgres 解析 "user= dbname=x" 时会
+    // 跳过 '=' 后的空白，把 user 读成 "dbname=x"（config.rs parameter() 的 skip_ws），
+    // 服务端就会收到用户名 "dbname=x" 而非默认系统用户。
+    #[test]
+    fn test_build_conn_str_omits_empty_user_and_password() {
+        let cfg = ConnConfig {
+            user: String::new(),
+            password: String::new(),
+            ..test_cfg()
+        };
+        let s = build_conn_str(&cfg, cfg.port);
+        assert!(!s.contains("user="), "空 user 必须省略 user= 键: {s}");
+        assert!(!s.contains("password="), "空 password 必须省略 password= 键: {s}");
+        assert!(s.contains("dbname=tusk_demo"), "dbname 必须保留: {s}");
+    }
+
+    #[test]
+    fn test_build_conn_str_keeps_nonempty_fields_quoted_password() {
+        let cfg = ConnConfig {
+            user: "tianjun".into(),
+            password: "it's".into(),
+            ..test_cfg()
+        };
+        let s = build_conn_str(&cfg, cfg.port);
+        assert_eq!(
+            s,
+            "host=localhost port=5432 user=tianjun dbname=tusk_demo password='it\\'s'",
+            "非空字段全保留且密码转义加引号: {s}"
+        );
     }
 
     #[tokio::test]
