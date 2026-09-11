@@ -78,6 +78,66 @@ describe('上下文判定', () => {
   });
 });
 
+describe('UPDATE / INSERT 作用域', () => {
+  it('UPDATE 的目标表进入作用域，其字段排在前面', () => {
+    // 默认 schema 里 schema.tables 顺序是 book_pages, books, item_audits
+    // 没修作用域时，空前缀会先列出 book_pages 的字段（id, title…），books 的字段排后面
+    const r = run('UPDATE books SET |');
+    expect(r?.items.slice(0, 2).map((i) => i.label)).toEqual(['id', 'name']);
+    expect(r?.items[0].kind).toBe('column');
+  });
+
+  it('UPDATE 的别名能解析（b. → books 的字段）', () => {
+    const r = run('UPDATE books b SET b.|');
+    expect(r?.items.map((i) => i.kind)).toEqual(['column', 'column']);
+    expect(r?.items.map((i) => i.label).sort()).toEqual(['id', 'name']);
+  });
+
+  it('UPDATE 别名限定符的替换范围不吞掉 b.', () => {
+    const r = run('UPDATE books b SET b.na|');
+    expect(r?.items[0].label).toBe('name');
+    expect('UPDATE books b SET b.na'.slice(r!.replaceFrom, r!.replaceTo)).toBe('na');
+  });
+
+  it('INSERT 列清单括号内只提示该表字段', () => {
+    const r = run('INSERT INTO books (|');
+    expect(r?.items.map((i) => i.kind)).toEqual(['column', 'column']);
+    expect(r?.items.map((i) => i.label).sort()).toEqual(['id', 'name']);
+  });
+
+  it('INSERT 列清单里打完逗号继续提示该表字段', () => {
+    const r = run('INSERT INTO books (id, na|');
+    expect(r?.items[0].label).toBe('name');
+    expect(r?.items[0].kind).toBe('column');
+  });
+
+  it('INSERT 列清单里嵌套函数调用也能正确判断', () => {
+    const r = run('INSERT INTO books (id, coalesce(x, 1), na|');
+    expect(r?.items[0].label).toBe('name');
+  });
+
+  it('列清单已闭合时不再当作列清单（VALUES 括号内不给表名）', () => {
+    const r = run('INSERT INTO books (id) VALUES (|');
+    expect(r === null || r.items.every((i) => i.kind !== 'table')).toBe(true);
+  });
+
+  it('INSERT VALUES 括号内给函数与关键字，不给表名', () => {
+    const r = run('INSERT INTO books VALUES (|');
+    expect(r).not.toBeNull();
+    expect(r!.items.every((i) => i.kind !== 'table')).toBe(true);
+    expect(r!.items.some((i) => i.kind === 'function' || i.kind === 'keyword')).toBe(true);
+  });
+
+  it('关键字不会被当成表名（FOR UPDATE OF t 不破坏限定符解析）', () => {
+    const s: CompletionSchema = {
+      tables: ['books', 'item_audits'],
+      columns: { books: [{ name: 'id' }, { name: 'name' }], item_audits: [{ name: 'audit_id' }] },
+    };
+    const r = run('SELECT item_audits.| FROM books FOR UPDATE OF item_audits', s);
+    expect(r?.items.map((i) => i.label)).toEqual(['audit_id']);
+  });
+});
+
 describe('字符串与注释', () => {
   it("字符串字面量里的分号不截断语句上下文", () => {
     const r = run("SELECT * FROM books WHERE name = 'a;b' AND na|");

@@ -185,6 +185,8 @@ function tokenize(src: string): Token[] {
 }
 
 const STOP_WORDS = new Set(keywords('merged'));
+/** 会引入表名的关键字：FROM/JOIN 之外还有 UPDATE 与 INSERT INTO（它们的目标表同样属于作用域） */
+const TABLE_INTRO = new Set(['FROM', 'JOIN', 'UPDATE', 'INTO']);
 
 /** 解析语句里的 FROM/JOIN 子句：别名 → 表名 映射，以及出现在作用域里的表（按出现顺序） */
 function parseScope(stmt: string): { aliases: Map<string, string>; tables: string[] } {
@@ -192,12 +194,14 @@ function parseScope(stmt: string): { aliases: Map<string, string>; tables: strin
   const aliases = new Map<string, string>();
   const tables: string[] = [];
   for (let i = 0; i < toks.length; i++) {
-    const w = toks[i].word.toUpperCase();
-    if (w !== 'FROM' && w !== 'JOIN') continue;
+    const t0 = toks[i];
+    if (t0.sep || !TABLE_INTRO.has(t0.word.toUpperCase())) continue;
     let j = i + 1;
     while (j < toks.length) {
       const t = toks[j];
       if (!t || t.sep) break;
+      // 关键字不是表名：`FOR UPDATE OF books` 里的 OF、`INSERT INTO books VALUES` 里的 VALUES
+      if (!t.quoted && STOP_WORDS.has(t.word.toUpperCase())) break;
       tables.push(t.word);
       j++;
       const after = toks[j];
@@ -227,6 +231,48 @@ function detectContext(prefixTokens: Token[]): 'table' | 'column' | 'any' {
     if (COLUMN_CTX.has(w)) return 'column';
   }
   return 'any';
+}
+
+/** 光标处是否还在未闭合的括号内 */
+function parenDepth(toks: Token[]): number {
+  let depth = 0;
+  for (const t of toks) {
+    if (!t.sep) continue;
+    if (t.word === '(') depth++;
+    else if (t.word === ')') depth--;
+  }
+  return depth;
+}
+
+/** 前缀里出现过 INTO（即这是一条 INSERT） */
+function hasInto(toks: Token[]): boolean {
+  return toks.some((t) => !t.sep && t.word.toUpperCase() === 'INTO');
+}
+
+/**
+ * INSERT 列清单：`INTO <表> (` 且光标处这个括号还没闭合时返回该表名，用于只提示该表的字段。
+ * 只看最后一个 INTO；括号一旦闭合就说明光标落在后面的括号里（例如 VALUES 的值括号），返回 null。
+ */
+function insertColumnTarget(prefixToks: Token[]): string | null {
+  for (let i = prefixToks.length - 1; i >= 0; i--) {
+    const t = prefixToks[i];
+    if (t.sep || t.word.toUpperCase() !== 'INTO') continue;
+    const tbl = prefixToks[i + 1];
+    const open = prefixToks[i + 2];
+    if (!tbl || tbl.sep || !open || !open.sep || open.word !== '(') return null;
+    let depth = 0;
+    for (let k = i + 2; k < prefixToks.length; k++) {
+      const s = prefixToks[k];
+      if (!s.sep) continue;
+      if (s.word === '(') depth++;
+      else if (s.word === ')') {
+        depth--;
+        if (depth === 0) return null;
+      }
+    }
+    return depth > 0 ? tbl.word : null;
+  }
+  return null;
 }
 
 /** 按 schema 里的原始拼写找到表名（列索引的 key 大小写可能与 SQL 里写的不一致） */
@@ -301,18 +347,35 @@ export function complete(input: CompleteInput): CompletionResult | null {
   const stmtEnd = scanForward(text, caret, quoted ? 'quoted' : 'code');
   const stmt = text.slice(back.stmtStart, stmtEnd);
   const { aliases, tables: scopeTables } = parseScope(stmt);
-  const ctx = qualifier !== null ? null : detectContext(tokenize(text.slice(back.stmtStart, caret)));
+  const prefixToks = tokenize(text.slice(back.stmtStart, caret));
+  const ctx = qualifier !== null ? null : detectContext(prefixToks);
+  const insertTarget = qualifier !== null || quoted ? null : insertColumnTarget(prefixToks);
 
-  // 空前缀的弹出门槛：点号后、引号内、手动触发，或光标刚好处在 FROM/SELECT 这类上下文关键字之后。
+  // 空前缀的弹出门槛：点号后、引号内、INSERT 列清单里、手动触发，或光标刚好处在 FROM/SELECT 这类上下文关键字之后。
   // 空白编辑器（没有上下文）不弹，避免一打开页签就冒出一个列表。
-  const allowEmpty = quoted || qualifier !== null || input.force === true || (ctx !== null && ctx !== 'any');
+  const allowEmpty =
+    quoted ||
+    qualifier !== null ||
+    insertTarget !== null ||
+    input.force === true ||
+    (ctx !== null && ctx !== 'any');
   if (prefix.length === 0 && !allowEmpty) return null;
 
   let candidates: CompletionItem[];
   if (qualifier !== null) {
     candidates = qualifierColumns(qualifier, schema, aliases);
+  } else if (insertTarget !== null) {
+    // INSERT 列清单里只可能填该表的字段
+    candidates = columnItems(insertTarget, schema);
   } else if (ctx === 'table') {
-    candidates = schema.tables.map((t) => ({ label: t, kind: 'table' as const }));
+    // INSERT ... VALUES ( 这类位置：表名没有意义，给函数与关键字（NULL/DEFAULT/now()…）
+    candidates =
+      hasInto(prefixToks) && parenDepth(prefixToks) > 0
+        ? [
+            ...functions(dialect).map((f) => ({ label: f, kind: 'function' as const })),
+            ...keywords(dialect).map((k) => ({ label: k, kind: 'keyword' as const })),
+          ]
+        : schema.tables.map((t) => ({ label: t, kind: 'table' as const }));
   } else if (ctx === 'column') {
     // 字段排在最前面，但关键字与函数也一并给出（否则 WHERE 之后连 EXISTS 都补不出来）
     candidates = [
