@@ -4,6 +4,8 @@
 	import Footer from '../lib/components/Footer.svelte';
 	import ConnDialog from '../lib/components/ConnDialog.svelte';
 	import Sidebar from '../lib/components/Sidebar.svelte';
+	import SqlEditor from '../lib/components/SqlEditor.svelte';
+  import type { Dialect } from '../lib/sql-dialect';
   import { listen } from '@tauri-apps/api/event';
   import { format as formatSql } from 'sql-formatter';
   import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
@@ -159,6 +161,7 @@
     for (const k of Object.keys(tables)) if (k.startsWith(conn + '::')) delete tables[k];
     for (const k of Object.keys(treeOpen)) if (k.startsWith(conn + '::')) delete treeOpen[k];
     for (const k of Object.keys(columns)) if (k.startsWith(conn + '::')) delete columns[k];
+    for (const k of Object.keys(columnIndex)) if (k.startsWith(conn + '::')) delete columnIndex[k];
     // 关闭属于该连接的页签
     for (const t of tabs.filter((x) => x.connId === conn)) closeTab(t.id);
     if (connId === conn) {
@@ -428,6 +431,7 @@
   // 刷新库的表列表（保持展开状态）
   async function refreshTables(conn: string, db: string) {
     try {
+      invalidateSchema(conn, db); // 结构可能变了，先作废缓存
       tables[ck(conn, db)] = await invoke<TableInfo[]>('list_tables', { connId: conn, dbname: db });
     } catch (e) {
       status = `刷新表失败: ${e}`;
@@ -664,6 +668,7 @@
     dbMenu = null;
     loadingKey = ck(conn, db);
     try {
+      invalidateSchema(conn, db); // 结构可能变了，先作废缓存
       tables[ck(conn, db)] = await invoke<TableInfo[]>('list_tables', { connId: conn, dbname: db });
     } catch (e) {
       status = `加载表失败: ${e}`;
@@ -764,7 +769,7 @@
         for (const t of [...tabs]) {
           if (t.connId === cd.conn && t.dbname === cd.db) closeTab(t.id);
         }
-        delete tables[ck(cd.conn, cd.db)];
+        invalidateSchema(cd.conn, cd.db);
         delete treeOpen[ck(cd.conn, cd.db)];
         if (connDbs[cd.conn]) connDbs[cd.conn] = connDbs[cd.conn].filter((d) => d.name !== cd.db);
         return;
@@ -794,6 +799,65 @@
   }
   let columns = $state<Record<string, SchemaColumn[]>>({});
   let loadingKey = $state('');
+
+  // ===== SQL 补全：整库字段索引 =====
+  /** 每个库的字段索引（key: ck(conn, db) → 表名 → 字段） */
+  let columnIndex = $state<Record<string, Record<string, SchemaColumn[]>>>({});
+  /** 去重标记，避免同一库并发重复请求 */
+  let schemaLoading = $state<Record<string, boolean>>({});
+
+  /** 库的表列表或结构变了，连带清掉字段索引 */
+  function invalidateSchema(conn: string, db: string) {
+    delete tables[ck(conn, db)];
+    delete columnIndex[ck(conn, db)];
+  }
+
+  /** 补全用到的 schema：当前查询页签目标库的表名与字段名（加载失败就自然降级） */
+  async function ensureSchema(conn: string, db: string) {
+    if (!conn || !db) return;
+    const key = ck(conn, db);
+    if (!tables[key]) {
+      try {
+        tables[key] = await invoke<TableInfo[]>('list_tables', { connId: conn, dbname: db });
+      } catch {
+        /* 静默降级：只剩关键字与函数 */
+      }
+    }
+    if (!columnIndex[key] && !schemaLoading[key]) {
+      schemaLoading[key] = true;
+      try {
+        columnIndex[key] = await invoke<Record<string, SchemaColumn[]>>('list_columns_bulk', {
+          connId: conn,
+          dbname: db,
+        });
+      } catch {
+        /* 静默降级：没有字段候选，但补全本身照常可用 */
+      }
+      schemaLoading[key] = false;
+    }
+  }
+
+  /** 连接的保存信息（db_type / dbname 都在这里） */
+  function savedConnOf(conn: string) {
+    const node = connNodes.find((n) => n.id === conn);
+    return savedConns.find((s) => s.name === node?.name);
+  }
+
+  /** 补全的目标库：优先连接配置里的默认库，取不到再退到侧栏当前库 */
+  function completionDb(conn: string): string {
+    const saved = savedConnOf(conn);
+    const dbs = connDbs[conn] ?? [];
+    if (saved?.dbname && dbs.some((d) => d.name === saved.dbname)) return saved.dbname;
+    return dbs[0]?.name ?? saved?.dbname ?? activeDb ?? '';
+  }
+
+  /** 补全方言：连接类型取不到时用 PG ∪ SQLite 合并关键字 */
+  function completionDialect(conn: string): Dialect {
+    const t = savedConnOf(conn)?.db_type;
+    if (t === 'sqlite') return 'sqlite';
+    if (t === 'postgres') return 'postgresql';
+    return 'merged';
+  }
 
   // ===== 对象搜索（Cmd+F） =====
   let searchOpen = $state(false);
@@ -953,6 +1017,7 @@
       syncDiffs = [];
       // 清目标库表缓存，强制树重新加载（否则显示旧数据）
       delete tables[syncDst];
+      delete columnIndex[syncDst];
       delete treeOpen[syncDst];
       await loadDbs();
     } catch (e) {
@@ -1188,6 +1253,27 @@
   }
 
   const activeTab = $derived(tabs.find((t) => t.id === activeTabId) ?? tabs[0]);
+
+  /** 当前查询页签的补全 schema；切到表页签或没有库时给空 schema */
+  const completionSchema = $derived.by(() => {
+    const t = activeTab;
+    if (!t || t.kind !== 'query' || !t.connId) return { tables: [] as string[], columns: {} };
+    const key = ck(t.connId, completionDb(t.connId));
+    return {
+      tables: (tables[key] ?? []).map((x) => x.name),
+      columns: columnIndex[key] ?? {},
+    };
+  });
+
+  const currentDialect = $derived(activeTab?.connId ? completionDialect(activeTab.connId) : ('merged' as Dialect));
+
+  // 当前查询页签的目标库一旦变化，后台把表与字段补上（不阻塞输入，失败静默）
+  $effect(() => {
+    const t = activeTab;
+    if (!t || t.kind !== 'query' || !t.connId) return;
+    const db = completionDb(t.connId);
+    if (db) void ensureSchema(t.connId, db);
+  });
 
   // ================= 连接 =================
   async function doConnect() {
@@ -1887,11 +1973,12 @@
         {#if activeTab.kind === 'query'}
           <div class="tab-content">
             <div class="editor">
-              <textarea
+              <SqlEditor
                 bind:value={activeTab.sql}
-                placeholder="输入 SQL…（Cmd/Ctrl + Enter 执行）"
+                schema={completionSchema}
+                dialect={currentDialect}
                 onkeydown={keydown}
-              ></textarea>
+              />
               <div class="editor-bar">
                 <button onclick={() => runQuery(activeTab)} disabled={!connId || activeTab.running}>
                   ▶ 执行
