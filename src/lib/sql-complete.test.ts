@@ -136,8 +136,28 @@ describe('过滤、排序与门槛', () => {
     expect(r!.items[0].kind).toBe('table');
   });
 
-  it('普通位置空前缀不弹', () => {
-    expect(run('SELECT * FROM |')).toBeNull();
+  it('FROM 之后空前缀就弹表名', () => {
+    const r = run('SELECT * FROM |');
+    expect(r?.items[0].kind).toBe('table');
+    expect(r?.items.map((i) => i.label)).toContain('book_pages');
+  });
+
+  it('空白编辑器不弹（没有上下文，避免一开页签就冒列表）', () => {
+    expect(run('|')).toBeNull();
+  });
+
+  // 空前缀时按「表 → 函数 → 关键字」排序且有 50 条上限，所以这里只断言"有候选"；
+  // 关键字能不能补出来由带前缀的用例（sel| → SELECT）保证
+  it('手动触发时空前缀也弹候选', () => {
+    const r = complete({ text: '', caret: 0, dialect: 'postgresql', schema, force: true });
+    expect(r).not.toBeNull();
+    expect(r!.items.length).toBeGreaterThan(0);
+  });
+
+  it('字段上下文里字段排第一，关键字也补得出来', () => {
+    const r = run('SELECT * FROM books WHERE EXIS|');
+    expect(r?.items.map((i) => i.label)).toContain('EXISTS');
+    expect(r?.items.find((i) => i.label === 'EXISTS')?.kind).toBe('keyword');
   });
 
   it('点号后空前缀也弹', () => {

@@ -26,7 +26,6 @@
   let mirror: HTMLDivElement | undefined = $state();
   let acEl: HTMLDivElement | undefined = $state();
   let composing = $state(false);
-  let navigating = $state(false);
   let result = $state<{ items: CompletionItem[]; replaceFrom: number; replaceTo: number } | null>(null);
   let sel = $state(0);
   let pos = $state({ left: 0, top: 0 });
@@ -44,16 +43,17 @@
     result = null;
   }
 
-  function recompute() {
+  function recompute(force = false) {
     if (!el || composing || el.selectionStart !== el.selectionEnd) {
       close();
       return;
     }
     try {
-      const r = complete({ text: el.value, caret: el.selectionStart ?? 0, dialect, schema });
+      const r = complete({ text: el.value, caret: el.selectionStart ?? 0, dialect, schema, force });
       result = r;
       sel = 0;
       if (r) measure(r.replaceFrom);
+      else close();
     } catch {
       // 补全永不阻塞输入
       close();
@@ -92,18 +92,24 @@
     }
   }
 
+  const CARET_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
+
   function handleKeydown(e: KeyboardEvent) {
+    // Ctrl/Cmd+Space 手动触发（没有上下文时也能弹）
+    if ((e.metaKey || e.ctrlKey) && e.key === ' ') {
+      e.preventDefault();
+      recompute(true);
+      return onkeydown?.(e);
+    }
     if (open) {
       const items = result!.items;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        navigating = true;
         sel = (sel + 1) % items.length;
         return onkeydown?.(e);
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        navigating = true;
         sel = (sel - 1 + items.length) % items.length;
         return onkeydown?.(e);
       }
@@ -121,17 +127,11 @@
         // 只关浮层，不拦截：Enter 照常换行
         close();
       }
+    } else if (CARET_KEYS.has(e.key)) {
+      // 单纯移动光标不重新弹，避免翻代码时到处冒列表（要弹就 Ctrl/Cmd+Space）
+      close();
     }
     onkeydown?.(e);
-  }
-
-  function handleKeyup(e: KeyboardEvent) {
-    if (navigating) {
-      navigating = false;
-      return;
-    }
-    if (e.key === 'Escape') return;
-    recompute();
   }
 </script>
 
@@ -144,9 +144,8 @@
     autocomplete="off"
     autocapitalize="off"
     onkeydown={handleKeydown}
-    onkeyup={handleKeyup}
-    oninput={recompute}
-    onclick={recompute}
+    oninput={() => recompute()}
+    onclick={close}
     onscroll={() => {
       if (result && el) measure(el.selectionStart ?? 0);
     }}

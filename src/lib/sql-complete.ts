@@ -27,6 +27,8 @@ export type CompleteInput = {
   caret: number;
   dialect: Dialect;
   schema: CompletionSchema;
+  /** 手动触发（Ctrl/Cmd+Space）：即使没有上下文、空前缀也弹 */
+  force?: boolean;
 };
 
 const MAX_ITEMS = 50;
@@ -296,29 +298,34 @@ export function complete(input: CompleteInput): CompletionResult | null {
   const rawPrefix = quoted ? text.slice(prefixFrom + 1, caret) : text.slice(prefixFrom, caret);
   const prefix = quoted ? rawPrefix.replace(/""/g, '"') : rawPrefix;
 
-  // 普通位置必须至少敲了一个字符才弹；点号后与引号内允许空前缀
-  if (!quoted && !qualifier && prefix.length === 0) return null;
-
   const stmtEnd = scanForward(text, caret, quoted ? 'quoted' : 'code');
   const stmt = text.slice(back.stmtStart, stmtEnd);
   const { aliases, tables: scopeTables } = parseScope(stmt);
+  const ctx = qualifier !== null ? null : detectContext(tokenize(text.slice(back.stmtStart, caret)));
+
+  // 空前缀的弹出门槛：点号后、引号内、手动触发，或光标刚好处在 FROM/SELECT 这类上下文关键字之后。
+  // 空白编辑器（没有上下文）不弹，避免一打开页签就冒出一个列表。
+  const allowEmpty = quoted || qualifier !== null || input.force === true || (ctx !== null && ctx !== 'any');
+  if (prefix.length === 0 && !allowEmpty) return null;
 
   let candidates: CompletionItem[];
   if (qualifier !== null) {
     candidates = qualifierColumns(qualifier, schema, aliases);
+  } else if (ctx === 'table') {
+    candidates = schema.tables.map((t) => ({ label: t, kind: 'table' as const }));
+  } else if (ctx === 'column') {
+    // 字段排在最前面，但关键字与函数也一并给出（否则 WHERE 之后连 EXISTS 都补不出来）
+    candidates = [
+      ...scopedColumnItems(schema, scopeTables),
+      ...functions(dialect).map((f) => ({ label: f, kind: 'function' as const })),
+      ...keywords(dialect).map((k) => ({ label: k, kind: 'keyword' as const })),
+    ];
   } else {
-    const ctx = detectContext(tokenize(text.slice(back.stmtStart, caret)));
-    if (ctx === 'table') {
-      candidates = schema.tables.map((t) => ({ label: t, kind: 'table' as const }));
-    } else if (ctx === 'column') {
-      candidates = scopedColumnItems(schema, scopeTables);
-    } else {
-      candidates = [
-        ...schema.tables.map((t) => ({ label: t, kind: 'table' as const })),
-        ...functions(dialect).map((f) => ({ label: f, kind: 'function' as const })),
-        ...keywords(dialect).map((k) => ({ label: k, kind: 'keyword' as const })),
-      ];
-    }
+    candidates = [
+      ...schema.tables.map((t) => ({ label: t, kind: 'table' as const })),
+      ...functions(dialect).map((f) => ({ label: f, kind: 'function' as const })),
+      ...keywords(dialect).map((k) => ({ label: k, kind: 'keyword' as const })),
+    ];
   }
 
   const q = prefix.toLowerCase();
