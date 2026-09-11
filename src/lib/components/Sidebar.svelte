@@ -84,7 +84,7 @@
                   {#each connDbs[c.id] ?? [] as db}
                     <div class="tree-node">
                       <div
-                        class="tree-row"
+                        class="tree-row db-row"
                         class:open={treeOpen[ck(c.id, db.name)]}
                         role="button"
                         tabindex="0"
@@ -95,20 +95,26 @@
                         <span class="arrow">{treeOpen[ck(c.id, db.name)] ? '▾' : '▸'}</span>
                         <span class="ico tree-db-ico">
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                            <ellipse cx="12" cy="5" rx="8" ry="3" />
+                            <ellipse cx="12" cy="5" rx="8" ry="3" fill="rgba(79, 195, 247, 0.22)" />
                             <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
                             <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
                           </svg>
                         </span>
                         <span class="label">{db.name}</span>
                         {#if loadingKey === ck(c.id, db.name)}<span class="spin">…</span>{/if}
+                        {#if tables[ck(c.id, db.name)]}
+                          {@const objs = tables[ck(c.id, db.name)] as { kind: string }[]}
+                          {@const nTbl = objs.filter((t) => t.kind === 'table').length}
+                          {@const nView = objs.length - nTbl}
+                          <span class="db-count">{nTbl} 表{#if nView > 0} · {nView} 视图{/if}</span>
+                        {/if}
                       </div>
                       {#if treeOpen[ck(c.id, db.name)] && tables[ck(c.id, db.name)]}
                         <div class="tree-children">
                           {#each tables[ck(c.id, db.name)] as tb}
                             <div class="tree-node">
                               <div
-                                class="tree-row"
+                                class="tree-row tbl-row"
                                 class:open={treeOpen[ck(c.id, `${db.name}.${tb.name}`)]}
                                 role="button"
                                 tabindex="0"
@@ -351,6 +357,52 @@
     justify-content: center;
   }
 
+  /* 数据库行：蓝色圆柱图标 + 加粗提亮，和表行拉开层级 */
+  .tree-row.db-row {
+    padding-top: 4px;
+    padding-bottom: 4px;
+    color: #e8ebf0;
+  }
+
+  .tree-row.db-row .ico {
+    color: #4fc3f7;
+  }
+
+  .tree-row.db-row .db-count {
+    margin-left: auto;
+    padding-left: 6px;
+    font-size: 10px;
+    font-weight: 400;
+    color: #6b7484;
+    flex-shrink: 0;
+  }
+
+  .tree-row.db-row .ico svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .tree-row.db-row .label {
+    font-weight: 600;
+  }
+
+  .tree-row.db-row.open {
+    background: #1e232e;
+  }
+
+  .tree-row.db-row.open:hover {
+    background: #242833;
+  }
+
+  /* 表行：灰色图标 + 常规字重，视觉上弱于数据库行 */
+  .tree-row.tbl-row .ico {
+    color: #79828f;
+  }
+
+  .tree-row.tbl-row .label {
+    color: #b9c0cc;
+  }
+
   .conn-dot::before {
     content: '';
     width: 7px;
@@ -384,7 +436,7 @@
 
   .tree-row.leaf {
     cursor: default;
-    padding-left: 30px;
+    padding-left: 24px;
   }
 
   .tree-row .arrow {
@@ -411,7 +463,9 @@
   }
 
   .tree-children {
-    margin-left: 14px;
+    margin-left: 15px;
+    padding-left: 6px;
+    border-left: 1px solid #2b303b;
   }
 
   .spin {
