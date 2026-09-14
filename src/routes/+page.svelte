@@ -1037,6 +1037,10 @@
   let updateCheckMsg = $state('');
   let updateBusy = $state(false);
   let updatePercent = $state(0);
+  /** 下载相位：connecting / downloading / retrying（后端 update-progress 事件带过来） */
+  let updatePhase = $state('connecting');
+  /** 已下载字节与总字节（total 为 0 表示服务端没给 Content-Length，只能显示字节数） */
+  let updateBytes = $state({ done: 0, total: 0 });
 
   function verCmp(a: string, b: string): number {
     const pa = a.replace(/^v/i, '').split('.').map(Number);
@@ -1074,6 +1078,13 @@
     }
   }
 
+  /** 字节数格式化（Content-Length 缺失时用） */
+  function fmtBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+
   /** 下载并安装更新：下载 → 进度 → 安装 → 自动重启 */
   async function doUpdate() {
     const info = updateInfo;
@@ -1084,9 +1095,18 @@
     }
     updateBusy = true;
     updatePercent = 0;
+    updatePhase = 'connecting';
+    updateBytes = { done: 0, total: 0 };
     updateCheckMsg = '';
-    const unlisten = await listen<{ percent: number }>('update-progress', (e) => {
+    const unlisten = await listen<{
+      phase?: string;
+      percent: number;
+      downloaded?: number;
+      total?: number;
+    }>('update-progress', (e) => {
+      updatePhase = e.payload.phase ?? 'downloading';
       updatePercent = e.payload.percent ?? 0;
+      updateBytes = { done: e.payload.downloaded ?? 0, total: e.payload.total ?? 0 };
     });
     try {
       const target = `${await invoke<string>('get_download_dir')}/tusk-update.dmg`;
@@ -2726,13 +2746,30 @@
           {/if}
           <div class="field-actions" style="margin-top: 18px">
             {#if updateBusy}
+              {@const known = updatePhase === 'downloading' && updateBytes.total > 0}
               <div class="update-progress">
                 <div class="update-bar">
-                  <div class="update-bar-fill" style={`width:${updatePercent}%`}></div>
+                  {#if known}
+                    <div class="update-bar-fill" style={`width:${updatePercent}%`}></div>
+                  {:else}
+                    <!-- 还没拿到总大小（或正在连接/重试）：用不确定进度动画，不再假装 0% -->
+                    <div class="update-bar-fill indet"></div>
+                  {/if}
                 </div>
-                <span class="update-pct">{updatePercent}%</span>
+                <span class="update-pct">
+                  {#if known}{updatePercent}%{:else if updatePhase === 'connecting'}连接中{:else if updatePhase === 'retrying'}重试中{:else}下载中{/if}
+                </span>
               </div>
-              <div class="update-msg">{updateCheckMsg || '正在下载更新包…'}</div>
+              <div class="update-msg">
+                {updateCheckMsg ||
+                  (updatePhase === 'connecting'
+                    ? '正在连接 GitHub…'
+                    : updatePhase === 'retrying'
+                      ? '连接中断，正在重试…'
+                      : updateBytes.total > 0
+                        ? `正在下载更新包… ${fmtBytes(updateBytes.done)} / ${fmtBytes(updateBytes.total)}`
+                        : `正在下载更新包… 已下载 ${fmtBytes(updateBytes.done)}`)}
+              </div>
             {:else}
               <button onclick={() => (updateInfo = null)}>稍后再说</button>
               <button onclick={doUpdate} class="primary">⬇ 下载并安装</button>
@@ -4008,6 +4045,21 @@
     background: #2f6fed;
     border-radius: 3px;
     transition: width 0.15s ease;
+  }
+
+  /* 不确定进度（正在连接/重试/服务端没给总大小）：左右滑动的条，避免"假 0%"看起来像卡死 */
+  .update-bar-fill.indet {
+    width: 35%;
+    animation: indet-slide 1.3s ease-in-out infinite;
+  }
+
+  @keyframes indet-slide {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(300%);
+    }
   }
 
   .update-pct {

@@ -2200,7 +2200,53 @@ pub async fn check_update() -> Result<serde_json::Value, String> {
 }
 
 
-/// 下载更新包（流式 + 进度事件）
+/// 下载用的 Agent：卡住的连接靠 timeout_read 兜住
+/// （ureq 默认 timeout_read 是 None —— 连接一旦被黑洞化就会一直等到 600s 的总体超时，
+///   这正是"进度条停在 0%、最长干等 10 分钟"的原因）
+fn download_agent() -> ureq::Agent {
+    ureq::builder()
+        .timeout_connect(std::time::Duration::from_secs(15))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .build()
+}
+
+/// 下载到文件；每读到一块就回调 (phase, downloaded, total)
+fn download_to_file(
+    agent: &ureq::Agent,
+    url: &str,
+    target: &std::path::Path,
+    on_progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<(), String> {
+    let resp = agent
+        .get(url)
+        .set("User-Agent", "tusk-desktop")
+        .timeout(std::time::Duration::from_secs(600))
+        .call()
+        .map_err(|e| format!("{e}"))?;
+    let total: u64 = resp
+        .header("Content-Length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut reader = resp.into_reader();
+    let mut file = std::fs::File::create(target).map_err(|e| format!("创建文件失败: {e}"))?;
+    use std::io::{Read, Write};
+    let mut buf = [0u8; 65536];
+    let mut done: u64 = 0;
+    // 先报一次，让 UI 从"正在连接…"切到"正在下载…"
+    on_progress("downloading", 0, total);
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| format!("读取下载流失败: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n]).map_err(|e| format!("写入文件失败: {e}"))?;
+        done += n as u64;
+        on_progress("downloading", done, total);
+    }
+    Ok(())
+}
+
+/// 下载更新包（流式 + 进度事件；失败换新连接重试一次）
 #[tauri::command]
 pub async fn download_update(
     app: tauri::AppHandle,
@@ -2208,34 +2254,38 @@ pub async fn download_update(
     target: String,
 ) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let resp = ureq::get(&url)
-            .set("User-Agent", "tusk-desktop")
-            .timeout(std::time::Duration::from_secs(600))
-            .call()
-            .map_err(|e| format!("下载失败: {e}"))?;
-        let total: u64 = resp
-            .header("Content-Length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let mut reader = resp.into_reader();
-        let mut file = std::fs::File::create(&target).map_err(|e| format!("创建文件失败: {e}"))?;
-        use std::io::{Read, Write};
-        let mut buf = [0u8; 65536];
-        let mut done: u64 = 0;
-        loop {
-            let n = reader.read(&mut buf).map_err(|e| format!("读取下载流失败: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buf[..n]).map_err(|e| format!("写入文件失败: {e}"))?;
-            done += n as u64;
+        let emit = |phase: &str, done: u64, total: u64| {
             let pct = if total > 0 { (done * 100 / total) as u32 } else { 0 };
             let _ = app.emit(
                 "update-progress",
-                serde_json::json!({ "percent": pct, "downloaded": done, "total": total }),
+                serde_json::json!({
+                    "phase": phase,
+                    "percent": pct,
+                    "downloaded": done,
+                    "total": total,
+                }),
             );
+        };
+        emit("connecting", 0, 0);
+        let path = std::path::PathBuf::from(&target);
+        let mut last = format!("{url}: 未知错误");
+        for attempt in 0..2 {
+            // 每次重试都新建 Agent：连接池按 host 复用，复用那条卡住的连接没有意义
+            let agent = download_agent();
+            match download_to_file(&agent, &url, &path, &mut |phase, done, total| {
+                emit(phase, done, total)
+            }) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last = e;
+                    if attempt == 0 {
+                        emit("retrying", 0, 0);
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
         }
-        Ok(())
+        Err(format!("下载失败（已重试一次）：{last}"))
     })
     .await
     .map_err(|e| format!("下载任务失败: {e}"))?
@@ -4750,6 +4800,40 @@ mod tests {
         assert!(tag.starts_with('v'), "tag 形如 v1.5.1，实际: {tag}");
         assert!(asset.ends_with(".dmg"), "应拿到 dmg 地址，实际: {asset}");
         assert!(asset.contains(tag), "dmg 地址应属于该 tag: {asset}");
+    }
+
+    /// 网络冒烟测试：下载路径（走生产代码 download_to_file，验证超时配置与整包完整性）
+    /// 手动跑：`cargo test test_download_to_file_smoke -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "需要外网且会下载约 7MB"]
+    async fn test_download_to_file_smoke() {
+        tokio::task::spawn_blocking(|| {
+            let url = format!("{RELEASES_PAGE}/download/v1.5.2/Tusk_1.5.2_aarch64.dmg");
+            let target = std::env::temp_dir().join("tusk-download-smoke.dmg");
+            let _ = std::fs::remove_file(&target);
+            let agent = download_agent();
+            let t0 = std::time::Instant::now();
+            let mut phases: Vec<String> = Vec::new();
+            let mut seen_total = 0u64;
+            download_to_file(&agent, &url, &target, &mut |phase, done, total| {
+                if phases.last().map(|p| p != phase).unwrap_or(true) {
+                    phases.push(phase.to_string());
+                    println!("相位 {phase}: done={done} total={total} 用时={:?}", t0.elapsed());
+                }
+                if total > 0 {
+                    seen_total = total;
+                }
+            })
+            .expect("下载应成功");
+            let size = std::fs::metadata(&target).expect("文件应存在").len();
+            println!("落盘 {size} 字节，用时 {:?}", t0.elapsed());
+            assert_eq!(phases.first().map(|s| s.as_str()), Some("downloading"));
+            assert!(seen_total > 0, "应拿到 Content-Length（否则前端只能显示已下载字节数）");
+            assert_eq!(size, seen_total, "落盘大小应与 Content-Length 一致");
+            let _ = std::fs::remove_file(&target);
+        })
+        .await
+        .expect("任务 panic");
     }
 
     /// 网络冒烟测试：首选通道（API）仍能正常工作
