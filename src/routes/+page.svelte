@@ -9,6 +9,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { format as formatSql } from 'sql-formatter';
   import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
+  import { resolveConnName } from '../lib/conn-name';
 
   // ===== 窗口大小记忆：启动恢复、resize 防抖保存 =====
   try {
@@ -1327,12 +1328,16 @@
       ensureTab();
       await loadDbs();
       syncConnNodes();
-      // 勾选保存时写入连接管理
-      if (saveConn && connName.trim()) {
+      // 勾选保存时写入连接管理：名称留空会自动按参数命名/复用旧名，绝不静默丢失
+      if (saveConn) {
         try {
           await invoke('save_connection', {
             dbType,
-            name: connName.trim(),
+            name: resolveConnName(
+              savedConns,
+              { dbType, host, port, user, dbname, path: sqlitePath, sshEnabled, sshHost, sshPort, sshUser },
+              connName,
+            ),
             host,
             port,
             user,

@@ -156,7 +156,7 @@
               {/if}
               <div class="field">
                 <label for="f-cname">连接名</label>
-                <input id="f-cname" bind:value={connName} placeholder="保存后一键连接（可选）" />
+                <input id="f-cname" bind:value={connName} placeholder="留空将自动按 主机/数据库 命名" />
               </div>
               <div class="field-actions">
                 <label class="save-label">
