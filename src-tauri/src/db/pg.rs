@@ -63,6 +63,9 @@ async fn open_connection(cfg: &ConnConfig) -> Result<(Arc<Client>, String), Stri
 
 
 /// 核心：执行 SQL。查询语句返回行列数据，非查询语句返回影响行数。
+/// SQL 编辑器结果行数上限：超过就截断，避免百万行结果把前端卡死
+const MAX_QUERY_ROWS: usize = 500;
+
 async fn run_query(client: &Client, sql: &str) -> Result<QueryResult, String> {
     let stmt = client
         .prepare(sql)
@@ -82,10 +85,28 @@ async fn run_query(client: &Client, sql: &str) -> Result<QueryResult, String> {
             message: None,
         })
     } else {
-        let rows = client
-            .query(&stmt, &[])
-            .await
-            .map_err(|e| format!("查询失败: {e}"))?;
+        // 流式取数：读到上限就停，不再把剩余行拉回来
+        use futures::StreamExt;
+        use tokio_postgres::types::ToSql;
+        let mut pg_rows: Vec<tokio_postgres::Row> = Vec::new();
+        let mut truncated = false;
+        let empty_params: Vec<&(dyn ToSql + Sync)> = Vec::new();
+        {
+            let mut stream = std::pin::pin!(
+                client
+                    .query_raw(&stmt, empty_params)
+                    .await
+                    .map_err(|e| format!("查询失败: {e}"))?
+            );
+            while let Some(row) = stream.next().await {
+                let row = row.map_err(|e| format!("查询失败: {e}"))?;
+                if pg_rows.len() >= MAX_QUERY_ROWS {
+                    truncated = true;
+                    break; // 剩余行随 stream 丢弃，由连接任务回收
+                }
+                pg_rows.push(row);
+            }
+        }
         let columns: Vec<ColumnInfo> = stmt
             .columns()
             .iter()
@@ -95,12 +116,17 @@ async fn run_query(client: &Client, sql: &str) -> Result<QueryResult, String> {
             })
             .collect();
         let rows: Vec<Vec<serde_json::Value>> =
-            rows.iter().map(row_to_json).collect();
+            pg_rows.iter().map(row_to_json).collect();
+        let message = truncated.then(|| {
+            format!(
+                "结果超过 {MAX_QUERY_ROWS} 行，仅显示前 {MAX_QUERY_ROWS} 行；如需更多请在 SQL 里加 LIMIT"
+            )
+        });
         Ok(QueryResult {
             columns,
             rows,
             rows_affected: None,
-            message: None,
+            message,
         })
     }
 }
@@ -182,6 +208,8 @@ pub async fn disconnect(state: State<'_, AppState>, conn_id: String) -> Result<(
         .await
         .remove(&conn_id)
         .ok_or("连接不存在")?;
+    // 顺带清掉该会话的复用客户端与行数缓存
+    drop_session_caches(&state, &conn_id).await;
     Ok(())
 }
 
@@ -368,8 +396,9 @@ pub async fn list_tables(
     if entry.cfg.is_sqlite() {
         return crate::db::sqlite::list_tables(&entry, &dbname).await;
     }
-    let cfg = entry.cfg.clone();
-    list_tables_core(&cfg, &dbname).await
+    // 复用客户端：侧栏每次展开/刷新都走这里，避免反复握手
+    let client = client_for(&state, &conn_id, &dbname).await?;
+    list_tables_with(&client).await
 }
 
 
@@ -428,12 +457,8 @@ async fn list_databases_core(client: &Client) -> Result<Vec<DatabaseInfo>, Strin
 }
 
 
-/// 核心：列出目标库 public schema 下的表
-/// （PostgreSQL 连接绑定单库，需按目标库临时开连接）
-async fn list_tables_core(cfg: &ConnConfig, dbname: &str) -> Result<Vec<TableInfo>, String> {
-    let mut c = cfg.clone();
-    c.dbname = dbname.to_string();
-    let (client, _) = open_connection(&c).await?;
+/// 核心：列出目标库 public schema 下的表（在给定客户端上执行）
+async fn list_tables_with(client: &Client) -> Result<Vec<TableInfo>, String> {
     let rows = client
         .query(
             "SELECT c.relname,
@@ -453,6 +478,14 @@ async fn list_tables_core(cfg: &ConnConfig, dbname: &str) -> Result<Vec<TableInf
             kind: r.get(1),
         })
         .collect())
+}
+
+/// 兼容包装：按目标库临时开连接再列出表（一次性场景用）
+async fn list_tables_core(cfg: &ConnConfig, dbname: &str) -> Result<Vec<TableInfo>, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    list_tables_with(&client).await
 }
 
 
@@ -611,7 +644,7 @@ pub async fn drop_view(
 }
 
 
-/// 核心：列出表的字段信息（类型/可空/默认值/主键标记）
+/// 兼容包装：按目标库临时开连接再列出字段（一次性场景用）
 async fn list_columns_core(
     cfg: &ConnConfig,
     dbname: &str,
@@ -620,7 +653,11 @@ async fn list_columns_core(
     let mut c = cfg.clone();
     c.dbname = dbname.to_string();
     let (client, _) = open_connection(&c).await?;
+    list_columns_with(&client, table).await
+}
 
+/// 核心：列出表的字段信息（类型/可空/默认值/主键标记），在给定客户端上执行
+async fn list_columns_with(client: &Client, table: &str) -> Result<Vec<SchemaColumn>, String> {
     let tbl_lit = format!("\"{}\"", table.replace('"', "\"\""));
     let col_sql = format!(
         "SELECT a.attname,
@@ -749,19 +786,23 @@ async fn list_columns_bulk_core(
 }
 
 
-/// 核心：分页读取表数据（SELECT * + LIMIT/OFFSET + 总行数）
+/// count(*) 的执行方式：实时计算，或复用缓存值（大表 count 是全表扫描，翻页不该每次都算）
+#[derive(Clone, Copy)]
+pub enum CountMode {
+    Compute,
+    Use(i64),
+}
+
+/// 核心：分页读取表数据（SELECT * + LIMIT/OFFSET + 总行数），在给定客户端上执行
 /// 表名来自对象树（合法标识符），做双引号转义防注入
-async fn paginate_table_core(
-    cfg: &ConnConfig,
-    dbname: &str,
+async fn paginate_table_with(
+    client: &Client,
     table: &str,
     limit: u32,
     offset: u32,
     filters: Vec<FilterCond>,
+    count: CountMode,
 ) -> Result<TablePage, String> {
-    let mut c = cfg.clone();
-    c.dbname = dbname.to_string();
-    let (client, _) = open_connection(&c).await?;
     let qtable = format!("\"{}\"", table.replace('"', "\"\""));
 
     // 按主键排序（无主键表按物理位置 ctid，保证分页稳定）
@@ -801,7 +842,7 @@ async fn paginate_table_core(
     let mut where_sql = String::new();
     let mut binds: Vec<Option<String>> = Vec::new();
     if !filters.is_empty() {
-        let cols = list_columns_core(cfg, dbname, table).await?;
+        let cols = list_columns_with(client, table).await?;
         let mut wheres: Vec<String> = Vec::new();
         let mut idx = 1;
         for f in &filters {
@@ -848,11 +889,15 @@ async fn paginate_table_core(
         })
         .unwrap_or_default();
     let rows: Vec<Vec<serde_json::Value>> = rows.iter().map(row_to_json).collect();
-    let total: i64 = client
-        .query_one(&format!("SELECT count(*) FROM {qtable}{where_sql}"), &binds_ref)
-        .await
-        .map_err(|e| format!("查询总行数失败: {e}"))?
-        .get(0);
+    // count(*) 在大表上是全表扫描：能复用缓存值就跳过（由命令层决定）
+    let total: i64 = match count {
+        CountMode::Use(v) => v,
+        CountMode::Compute => client
+            .query_one(&format!("SELECT count(*) FROM {qtable}{where_sql}"), &binds_ref)
+            .await
+            .map_err(|e| format!("查询总行数失败: {e}"))?
+            .get(0),
+    };
     Ok(TablePage {
         columns,
         rows,
@@ -860,8 +905,26 @@ async fn paginate_table_core(
     })
 }
 
+/// 兼容包装：按目标库临时开连接再分页（一次性场景用，实时计算 count）
+async fn paginate_table_core(
+    cfg: &ConnConfig,
+    dbname: &str,
+    table: &str,
+    limit: u32,
+    offset: u32,
+    filters: Vec<FilterCond>,
+) -> Result<TablePage, String> {
+    let mut c = cfg.clone();
+    c.dbname = dbname.to_string();
+    let (client, _) = open_connection(&c).await?;
+    paginate_table_with(&client, table, limit, offset, filters, CountMode::Compute).await
+}
+
 
 /// 分页读取表数据（Tauri command 入口）
+/// 行数缓存 TTL 10 分钟：大表 count(*) 是全表扫描（实测百万行冷缓存 15s），翻页不该每次都算
+const COUNT_TTL_SECS: u64 = 600;
+
 #[tauri::command]
 pub async fn paginate_table(
     state: State<'_, AppState>,
@@ -872,16 +935,64 @@ pub async fn paginate_table(
     offset: u32,
     filters: Vec<FilterCond>,
 ) -> Result<TablePage, String> {
+    paginate_cached(&state, &conn_id, &dbname, &table, limit, offset, filters).await
+}
+
+/// 分页（含行数缓存与客户端复用）：独立成函数便于冒烟测试
+async fn paginate_cached(
+    state: &AppState,
+    conn_id: &str,
+    dbname: &str,
+    table: &str,
+    limit: u32,
+    offset: u32,
+    filters: Vec<FilterCond>,
+) -> Result<TablePage, String> {
     let entry = {
         let conns = state.conns.lock().await;
-        conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
+        conns.get(conn_id).cloned().ok_or("连接不存在或已断开")?
     };
     if entry.cfg.is_sqlite() {
         let page = if offset > 0 { offset / limit } else { 0 } as u64;
-        return crate::db::sqlite::paginate_table(&entry, &dbname, &table, page, limit as u64, filters.first().cloned()).await;
+        return crate::db::sqlite::paginate_table(&entry, dbname, table, page, limit as u64, filters.first().cloned()).await;
     }
-    let cfg = entry.cfg.clone();
-    let res = paginate_table_core(&cfg, &dbname, &table, limit, offset, filters).await;
+    let client = client_for(state, conn_id, dbname).await?;
+
+    // 行数缓存键：连接/库/表/筛选条件
+    let cache_key = format!(
+        "{conn_id}\u{1}{dbname}\u{1}{table}\u{1}{}",
+        filters
+            .iter()
+            .map(|f| format!("{}{}{:?}", f.column, f.op, f.value))
+            .collect::<Vec<_>>()
+            .join("\u{1}")
+    );
+    let cached_total = {
+        let cc = state.count_cache.lock().await;
+        cc.get(&cache_key)
+            .filter(|(_, at)| at.elapsed().as_secs() < COUNT_TTL_SECS)
+            .map(|(v, _)| *v)
+    };
+
+    let res = match cached_total {
+        Some(total) => {
+            paginate_table_with(&client, table, limit, offset, filters, CountMode::Use(total)).await
+        }
+        None => {
+            let page =
+                paginate_table_with(&client, table, limit, offset, filters, CountMode::Compute).await;
+            if let Ok(p) = &page {
+                if let Some(total) = p.total {
+                    state
+                        .count_cache
+                        .lock()
+                        .await
+                        .insert(cache_key, (total, std::time::Instant::now()));
+                }
+            }
+            page
+        }
+    };
     match &res {
         Ok(p) => eprintln!(
             "[tusk] paginate_table {dbname}.{table} limit={limit} offset={offset} -> {} 行, total={:?}",
@@ -940,6 +1051,67 @@ fn keychain_set(account: &str, password: &str) -> Result<(), String> {
             String::from_utf8_lossy(&out.stderr)
         ))
     }
+}
+
+
+/// 取（或建立）指定会话下、目标库的复用客户端
+/// 本库直接复用会话连接；跨库的临时连接缓存起来，避免每次翻页/列表都重新握手
+async fn client_for(
+    state: &AppState,
+    conn_id: &str,
+    dbname: &str,
+) -> Result<Arc<Client>, String> {
+    let entry = {
+        let conns = state.conns.lock().await;
+        conns.get(conn_id).cloned().ok_or("连接不存在或已断开")?
+    };
+    if entry.cfg.is_sqlite() {
+        return Err("该连接不是 PostgreSQL".to_string());
+    }
+    if entry.cfg.dbname == dbname {
+        return entry.pg_client();
+    }
+    {
+        let cache = state.db_clients.lock().await;
+        if let Some(c) = cache.get(&(conn_id.to_string(), dbname.to_string())) {
+            return Ok(c.clone());
+        }
+    }
+    let mut cfg = entry.cfg.clone();
+    cfg.dbname = dbname.to_string();
+    let (client, _) = open_connection(&cfg).await?;
+    state
+        .db_clients
+        .lock()
+        .await
+        .insert((conn_id.to_string(), dbname.to_string()), client.clone());
+    Ok(client)
+}
+
+/// 清掉某条会话在指定库上的复用客户端（连接不再需要时释放）
+async fn evict_db_client(state: &AppState, conn_id: &str, dbname: &str) {
+    state
+        .db_clients
+        .lock()
+        .await
+        .remove(&(conn_id.to_string(), dbname.to_string()));
+}
+
+/// 清空某条会话的全部复用客户端与行数缓存（断开连接时）
+async fn drop_session_caches(state: &AppState, conn_id: &str) {
+    {
+        let mut cache = state.db_clients.lock().await;
+        cache.retain(|(cid, _), _| cid != conn_id);
+    }
+    {
+        let mut cc = state.count_cache.lock().await;
+        cc.retain(|k, _| !k.starts_with(&format!("{conn_id}\u{1}")));
+    }
+}
+
+/// 数据/结构变更后清空行数缓存（下次翻页重新精确计算）
+async fn clear_count_cache(state: &AppState) {
+    state.count_cache.lock().await.clear();
 }
 
 
@@ -1325,6 +1497,7 @@ pub async fn update_cell(
     col_type: String,
     value: Option<String>,
 ) -> Result<u64, String> {
+    clear_count_cache(&state).await;
     let entry = {
         let conns = state.conns.lock().await;
         conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
@@ -1354,6 +1527,7 @@ pub async fn delete_row(
     pk_cols: Vec<String>,
     pk_vals: Vec<String>,
 ) -> Result<u64, String> {
+    clear_count_cache(&state).await;
     let entry = {
         let conns = state.conns.lock().await;
         conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
@@ -1381,6 +1555,7 @@ pub async fn insert_row(
     dbname: String,
     table: String,
 ) -> Result<i32, String> {
+    clear_count_cache(&state).await;
     let entry = {
         let conns = state.conns.lock().await;
         conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
@@ -1504,6 +1679,7 @@ pub async fn import_csv(
     table: String,
     path: String,
 ) -> Result<u64, String> {
+    clear_count_cache(&state).await;
     let entry = {
         let conns = state.conns.lock().await;
         conns.get(&conn_id).cloned().ok_or("连接不存在或已断开")?
@@ -1984,6 +2160,7 @@ pub async fn sync_data(
     dst_db: String,
     tables: Vec<String>,
 ) -> Result<(usize, usize), String> {
+    clear_count_cache(&state).await;
     let conns = state.conns.lock().await;
     let src_cfg = conns
         .get(&src_conn_id)
@@ -2522,6 +2699,7 @@ pub async fn drop_table(
         let conns = state.conns.lock().await;
         conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
     };
+    clear_count_cache(&state).await;
     let res = drop_table_core(&cfg, &dbname, &table).await;
     match &res {
         Ok(()) => eprintln!("[tusk] drop_table {dbname}.{table} 成功"),
@@ -2834,6 +3012,7 @@ pub async fn duplicate_table(
         let conns = state.conns.lock().await;
         conns.get(&conn_id).map(|e| e.cfg.clone()).ok_or("连接不存在或已断开")?
     };
+    clear_count_cache(&state).await;
     duplicate_table_core(&cfg, &dbname, &src_table, &new_table, with_data).await
 }
 
@@ -4800,6 +4979,39 @@ mod tests {
         assert!(tag.starts_with('v'), "tag 形如 v1.5.1，实际: {tag}");
         assert!(asset.ends_with(".dmg"), "应拿到 dmg 地址，实际: {asset}");
         assert!(asset.contains(tag), "dmg 地址应属于该 tag: {asset}");
+    }
+
+    /// 性能验证：分页缓存 + 客户端复用（首次要建连接和 count，第二次应明显更快）
+    /// 手动跑：`cargo test test_paginate_perf_smoke -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "需要本地大表 tusk_perf（100 万行）"]
+    async fn test_paginate_perf_smoke() {
+        let cfg = test_cfg();
+        let (client, _) = open_connection(&cfg).await.expect("连接失败");
+        let state = AppState {
+            conns: tokio::sync::Mutex::new(std::collections::HashMap::from([(
+                "perf".to_string(),
+                ConnEntry { client: Some(client.clone()), cfg: cfg.clone(), sqlite: None },
+            )])),
+            db_clients: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            count_cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let t0 = std::time::Instant::now();
+        let p1 = paginate_cached(&state, "perf", "tusk_perf", "big", 50, 0, vec![])
+            .await
+            .expect("首次分页失败");
+        let first = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        let p2 = paginate_cached(&state, "perf", "tusk_perf", "big", 50, 50, vec![])
+            .await
+            .expect("二次分页失败");
+        let second = t1.elapsed();
+        println!("首次分页: {:?}（建连接 + count 全表）", first);
+        println!("二次分页: {:?}（客户端复用 + 行数缓存）", second);
+        assert_eq!(p1.rows.len(), 50);
+        assert_eq!(p2.rows.len(), 50);
+        assert_eq!(p1.total, p2.total, "行数应一致");
+        println!("total={:?}", p1.total);
     }
 
     /// 网络冒烟测试：下载路径（走生产代码 download_to_file，验证超时配置与整包完整性）

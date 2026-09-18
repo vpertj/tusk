@@ -1167,6 +1167,7 @@
     rows: unknown[][];
     affected: number | null;
     error: string;
+    message?: string;
   }
 
   interface QueryTab {
@@ -1812,6 +1813,9 @@
         sql: t.sql,
       });
       t.results = res.results;
+      // 结果被截断时给出提示（后端有 500 行上限，防止大结果把界面卡死）
+      const truncated = res.results.find((r) => r.message);
+      if (truncated?.message) t.message = truncated.message;
       saveHistory(t.sql);
     } catch (e) {
       t.results = [{ columns: [], rows: [], affected: null, error: String(e) }];

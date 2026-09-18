@@ -16,6 +16,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             conns: Mutex::new(HashMap::new()),
+            db_clients: Mutex::new(HashMap::new()),
+            count_cache: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             connect,
