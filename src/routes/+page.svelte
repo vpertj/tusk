@@ -1941,6 +1941,9 @@
       {dropViewFromTree}
       {dropTableFromTree}
       {ck}
+      activeTableKey={activeTab?.kind === 'table' && activeTab.dbname && activeTab.table
+        ? ck(activeTab.connId, `${activeTab.dbname}.${activeTab.table}`)
+        : ''}
       {startSidebarResize}
     />
 
@@ -2222,7 +2225,7 @@
                   {canEdit(activeTab) ? '双击单元格编辑 · 点击行选中' : '无主键表仅可新增/导出'}
                 </span>
               </div>
-              <div class="result">
+              <div class="result table-result">
                 {#if activeTab.exportMsg}
                   <div class="ok">✓ {activeTab.exportMsg}</div>
                 {/if}
@@ -3362,6 +3365,8 @@
     flex: 1;
     display: flex;
     min-height: 0;
+    /* 没有 min-width:0 时，flex 子项不许比内容窄 → 宽表会把整条主区撑开而不是在内部滚动 */
+    min-width: 0;
   }
 
   /* ===== 连接管理弹窗 ===== */
@@ -3670,6 +3675,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    min-width: 0;
   }
 
   .tab-ico {
@@ -4722,6 +4728,42 @@
     border-radius: 8px;
     overflow-y: auto;
     min-height: 0;
+    min-width: 0;
+  }
+
+  /* 表页签的结果区：让滚动发生在 .table-wrap 里（横向滚动条常驻底部 + 表头 sticky 生效的前提） */
+  .result.table-result {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .table-result .table-wrap {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .table-result .count {
+    flex-shrink: 0;
+  }
+
+  /* 深色主题下让横向滚动条常驻可见，不用等滚动才出现 */
+  .table-result .table-wrap::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  .table-result .table-wrap::-webkit-scrollbar-track {
+    background: #171a20;
+  }
+
+  .table-result .table-wrap::-webkit-scrollbar-thumb {
+    background: #3a4150;
+    border-radius: 5px;
+  }
+
+  .table-result .table-wrap::-webkit-scrollbar-thumb:hover {
+    background: #4a5265;
   }
 
   .result-block {
@@ -4753,13 +4795,16 @@
     overflow: auto;
   }
 
+  /* separate + spacing 0：border-collapse:collapse 会让 sticky 表头的边框跟着滚动消失 */
   table {
-    border-collapse: collapse;
+    border-collapse: separate;
+    border-spacing: 0;
     width: 100%;
     font-size: 12px;
   }
 
   th {
+    /* sticky：纵向滚动时表头吸顶；sticky 也是定位元素，.resizer 的 absolute 定位不受影响 */
     position: sticky;
     top: 0;
     background: #242833;
@@ -4770,7 +4815,6 @@
     border-right: 1px solid #2e3340;
     white-space: nowrap;
     z-index: 1;
-    position: relative;
   }
 
   th:last-child {

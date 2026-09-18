@@ -22,6 +22,7 @@
     dropViewFromTree,
     dropTableFromTree,
     ck,
+    activeTableKey,
     startSidebarResize
   } = $props();
 </script>
@@ -116,6 +117,7 @@
                               <div
                                 class="tree-row tbl-row"
                                 class:open={treeOpen[ck(c.id, `${db.name}.${tb.name}`)]}
+                                class:active={activeTableKey === ck(c.id, `${db.name}.${tb.name}`)}
                                 role="button"
                                 tabindex="0"
                                 onclick={() => openTableTab(c.id, db.name, tb.name)}
@@ -401,6 +403,20 @@
 
   .tree-row.tbl-row .label {
     color: #b9c0cc;
+  }
+
+  /* 当前打开的表：深底 + 左侧蓝竖条，与连接行的选中态同一套语言 */
+  .tree-row.tbl-row.active {
+    background: #1d2a44;
+    box-shadow: inset 2px 0 0 #4fc3f7;
+  }
+
+  .tree-row.tbl-row.active .label {
+    color: #e8ebf0;
+  }
+
+  .tree-row.tbl-row.active .ico {
+    color: #4fc3f7;
   }
 
   .conn-dot::before {
